@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 
 TOKEN = os.getenv("BOT_TOKEN")
+print("TOKEN =", TOKEN)
 TASKS_FILE = "tasks.json"
 
 
