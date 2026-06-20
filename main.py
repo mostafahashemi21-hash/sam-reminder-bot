@@ -22,19 +22,20 @@ def save_tasks(tasks):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    keyboard = [
+        ["➕ کار جدید", "📋 کارها"],
+        ["📊 آمار", "❓ راهنما"]
+    ]
+
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True
+    )
+
     await update.message.reply_text(
-        """
-🤖 SAM PRO
-
-دستورات:
-
-/newtask عنوان کار
-/tasks
-/done شماره
-/delete شماره
-/stats
-/help
-"""
+        "🤖 SAM PRO\n\nبه ربات مدیریت کارها خوش آمدی.",
+        reply_markup=reply_markup
     )
 
 
