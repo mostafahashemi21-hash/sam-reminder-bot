@@ -26,8 +26,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
 🤖 SAM PRO
 
-به ربات مدیریت کارها خوش آمدی.
-
 دستورات:
 
 /newtask عنوان کار
@@ -46,7 +44,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📘 راهنما
 
 ایجاد کار:
-/newtask تماس با مشتری
+/newtask خرید ماشین
 
 نمایش کارها:
 /tasks
@@ -68,7 +66,7 @@ async def newtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not text:
         await update.message.reply_text(
-            "مثال:\n/newtask خرید ماشین"
+            "مثال:\n/newtask تماس با مشتری"
         )
         return
 
@@ -102,7 +100,6 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for task in tasks:
         status = "✅" if task["status"] == "done" else "⏳"
-
         msg += f"{task['id']}. {status} {task['title']}\n"
 
     await update.message.reply_text(msg)
@@ -178,4 +175,4 @@ app.add_handler(CommandHandler("delete", delete))
 app.add_handler(CommandHandler("stats", stats))
 
 if __name__ == "__main__":
-    app.run_polling() 
+    app.run_polling()
