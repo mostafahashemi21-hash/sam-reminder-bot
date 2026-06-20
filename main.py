@@ -1,31 +1,32 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-Application,
-CommandHandler,
-ContextTypes,
-)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 import os
 import json
 from datetime import datetime
 
 TOKEN = os.getenv("BOT_TOKEN")
-
 TASKS_FILE = "tasks.json"
 
+
 def load_tasks():
-if not os.path.exists(TASKS_FILE):
-return []
-with open(TASKS_FILE, "r", encoding="utf-8") as f:
-return json.load(f)
+    if not os.path.exists(TASKS_FILE):
+        return []
+
+    with open(TASKS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 
 def save_tasks(tasks):
-with open(TASKS_FILE, "w", encoding="utf-8") as f:
-json.dump(tasks, f, ensure_ascii=False, indent=2)
+    with open(TASKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(tasks, f, ensure_ascii=False, indent=2)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text(
-"""
+    await update.message.reply_text(
+        """
 🤖 SAM PRO
+
+به ربات مدیریت کارها خوش آمدی.
 
 دستورات:
 
@@ -36,11 +37,12 @@ await update.message.reply_text(
 /stats
 /help
 """
-)
+    )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text(
-"""
+    await update.message.reply_text(
+        """
 📘 راهنما
 
 ایجاد کار:
@@ -58,123 +60,112 @@ await update.message.reply_text(
 آمار:
 /stats
 """
-)
+    )
+
 
 async def newtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-text = " ".join(context.args)
+    text = " ".join(context.args)
 
-```
-if not text:
+    if not text:
+        await update.message.reply_text(
+            "مثال:\n/newtask خرید ماشین"
+        )
+        return
+
+    tasks = load_tasks()
+
+    task = {
+        "id": len(tasks) + 1,
+        "title": text,
+        "status": "pending",
+        "created": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }
+
+    tasks.append(task)
+    save_tasks(tasks)
+
     await update.message.reply_text(
-        "مثال:\n/newtask تماس با مشتری"
+        f"✅ کار ثبت شد:\n{text}"
     )
-    return
 
-tasks = load_tasks()
-
-task = {
-    "id": len(tasks) + 1,
-    "title": text,
-    "status": "pending",
-    "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-}
-
-tasks.append(task)
-save_tasks(tasks)
-
-await update.message.reply_text(
-    f"✅ کار ثبت شد\n\n{text}"
-)
-```
 
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-tasks = load_tasks()
+    tasks = load_tasks()
 
-```
-if not tasks:
-    await update.message.reply_text(
-        "📭 هیچ کاری ثبت نشده"
-    )
-    return
+    if not tasks:
+        await update.message.reply_text(
+            "📭 هیچ کاری ثبت نشده"
+        )
+        return
 
-msg = "📋 لیست کارها\n\n"
+    msg = "📋 لیست کارها\n\n"
 
-for task in tasks:
-    status = "✅" if task["status"] == "done" else "⏳"
+    for task in tasks:
+        status = "✅" if task["status"] == "done" else "⏳"
 
-    msg += (
-        f"{task['id']}. {status} {task['title']}\n"
-    )
+        msg += f"{task['id']}. {status} {task['title']}\n"
 
-await update.message.reply_text(msg)
-```
+    await update.message.reply_text(msg)
+
 
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not context.args:
-return
+    if not context.args:
+        return
 
-```
-task_id = int(context.args[0])
+    task_id = int(context.args[0])
 
-tasks = load_tasks()
+    tasks = load_tasks()
 
-for task in tasks:
-    if task["id"] == task_id:
-        task["status"] = "done"
+    for task in tasks:
+        if task["id"] == task_id:
+            task["status"] = "done"
 
-save_tasks(tasks)
+    save_tasks(tasks)
 
-await update.message.reply_text(
-    "✅ کار انجام شد"
-)
-```
+    await update.message.reply_text(
+        "✅ کار انجام شد"
+    )
+
 
 async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not context.args:
-return
+    if not context.args:
+        return
 
-```
-task_id = int(context.args[0])
+    task_id = int(context.args[0])
 
-tasks = load_tasks()
+    tasks = load_tasks()
 
-tasks = [
-    t for t in tasks
-    if t["id"] != task_id
-]
+    tasks = [
+        t for t in tasks
+        if t["id"] != task_id
+    ]
 
-save_tasks(tasks)
+    save_tasks(tasks)
 
-await update.message.reply_text(
-    "🗑 کار حذف شد"
-)
-```
+    await update.message.reply_text(
+        "🗑 کار حذف شد"
+    )
+
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-tasks = load_tasks()
+    tasks = load_tasks()
 
-```
-total = len(tasks)
+    total = len(tasks)
+    done_count = len(
+        [t for t in tasks if t["status"] == "done"]
+    )
+    pending = total - done_count
 
-done_count = len(
-    [t for t in tasks if t["status"] == "done"]
-)
-
-pending = total - done_count
-
-await update.message.reply_text(
-    f"""
-```
-
+    await update.message.reply_text(
+        f"""
 📊 آمار
 
 کل کارها: {total}
-
 انجام شده: {done_count}
-
 باز: {pending}
 """
-)
+    )
+
 
 app = Application.builder().token(TOKEN).build()
 
@@ -186,5 +177,5 @@ app.add_handler(CommandHandler("done", done))
 app.add_handler(CommandHandler("delete", delete))
 app.add_handler(CommandHandler("stats", stats))
 
-if **name** == "**main**":
-app.run_polling()
+if __name__ == "__main__":
+    app.run_polling()
