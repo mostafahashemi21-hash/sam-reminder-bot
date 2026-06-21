@@ -479,8 +479,7 @@ async def buttons(
 
     if text == "📋 کارها":
         await list_tasks(update, context)
-        
-        elif text == "🤖 دستیار هوشمند":
+         elif text == "🤖 دستیار هوشمند":
 
     USER_STATE[
         update.effective_user.id
