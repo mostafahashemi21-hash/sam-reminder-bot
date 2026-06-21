@@ -116,6 +116,88 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             print(f"Reminder send error for task {task_id}: {e}")
+
+async def task_status_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.split(":")
+
+    if len(data) != 3:
+        await query.edit_message_text("❌ دستور نامعتبر است.")
+        return
+
+    task_id = int(data[1])
+    new_status = data[2]
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT title, assigned_to, assigned_by, status
+        FROM tasks
+        WHERE id=?
+    """, (task_id,))
+
+    task = cur.fetchone()
+
+    if not task:
+        conn.close()
+        await query.edit_message_text("❌ این کار پیدا نشد.")
+        return
+
+    title, assigned_to, assigned_by, old_status = task
+
+    cur.execute("""
+        UPDATE tasks
+        SET status=?
+        WHERE id=?
+    """, (new_status, task_id))
+
+    conn.commit()
+    conn.close()
+
+    status_fa = STATUS_TEXT.get(new_status, new_status)
+
+    await query.edit_message_text(
+        f"""
+✅ وضعیت کار بروزرسانی شد
+
+🆔 شناسه کار: {task_id}
+
+📌 عنوان:
+{title}
+
+📍 وضعیت جدید:
+{status_fa}
+"""
+    )
+
+    if assigned_by and assigned_by != query.from_user.id:
+        try:
+            await context.bot.send_message(
+                chat_id=assigned_by,
+                text=f"""
+📢 بروزرسانی وضعیت کار
+
+🆔 شناسه کار: {task_id}
+
+📌 عنوان:
+{title}
+
+👤 توسط:
+{query.from_user.full_name}
+
+📍 وضعیت جدید:
+{status_fa}
+"""
+            )
+        except Exception as e:
+            print(f"Notify admin error for task {task_id}: {e}")
 USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
