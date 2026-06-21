@@ -494,7 +494,6 @@ async def create_task_member(
 
     return CREATE_PRIORITY
 
-
 async def create_task_priority(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -504,28 +503,87 @@ async def create_task_priority(
         update.message.text
     )
 
+    keyboard = [
+        ["⏰ یک ساعت بعد"],
+        ["⏰ دو ساعت بعد"],
+        ["🕒 مشخص کردن زمان"],
+        ["🚫 بدون یادآوری"]
+    ]
+
     await update.message.reply_text(
-        """
-⏰ زمان یادآوری را وارد کن
-
-مثال:
-
-2026-06-25 18:00
-"""
+        "⏰ زمان یادآوری را انتخاب کن:",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
     )
 
     return CREATE_REMINDER
-
 
 async def create_task_reminder(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    reminder_time = (
-        update.message.text
-    )
+    reminder_choice = update.message.text
 
+    if context.user_data.get("waiting_custom_reminder"):
+
+        try:
+            datetime.strptime(reminder_choice, "%Y-%m-%d %H:%M")
+            reminder_time = reminder_choice
+            context.user_data.pop("waiting_custom_reminder", None)
+
+        except:
+            await update.message.reply_text(
+                """
+❌ فرمت زمان اشتباه است.
+
+مثال درست:
+2026-06-25 18:00
+"""
+            )
+            return CREATE_REMINDER
+
+    elif reminder_choice == "⏰ یک ساعت بعد":
+
+        reminder_time = (
+            datetime.now() + timedelta(hours=1)
+        ).strftime("%Y-%m-%d %H:%M")
+
+    elif reminder_choice == "⏰ دو ساعت بعد":
+
+        reminder_time = (
+            datetime.now() + timedelta(hours=2)
+        ).strftime("%Y-%m-%d %H:%M")
+
+    elif reminder_choice == "🕒 مشخص کردن زمان":
+
+        context.user_data["waiting_custom_reminder"] = True
+
+        await update.message.reply_text(
+            """
+🕒 زمان یادآوری را وارد کن.
+
+مثال:
+2026-06-25 18:00
+"""
+        )
+
+        return CREATE_REMINDER
+
+    elif reminder_choice == "🚫 بدون یادآوری":
+
+        reminder_time = "none"
+
+    else:
+
+        await update.message.reply_text(
+            "لطفاً یکی از دکمه‌ها را انتخاب کن."
+        )
+
+        return CREATE_REMINDER
     title = context.user_data["title"]
 
     member_name = (
