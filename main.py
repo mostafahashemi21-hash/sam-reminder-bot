@@ -12,7 +12,8 @@ from telegram.ext import (
     MessageHandler,
     ConversationHandler,
     ContextTypes,
-    filters
+    filters,
+    JobQueue
 )
 
 from database import (
