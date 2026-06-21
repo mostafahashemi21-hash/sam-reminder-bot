@@ -32,6 +32,36 @@ from datetime import datetime
 import sqlite3
 import os
 
+from datetime import datetime
+import sqlite3
+async def check_tasks(context):
+    import sqlite3
+    from datetime import datetime
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    cur.execute("""
+        SELECT id, title, assigned_to, reminder_time
+        FROM tasks
+        WHERE status != 'done'
+    """)
+
+    tasks = cur.fetchall()
+
+    for task in tasks:
+        task_id, title, assigned_to, reminder_time = task
+
+        if reminder_time == now:
+            await context.bot.send_message(
+                chat_id=assigned_to,
+                text=f"⏰ یادآوری کار:\n\n{title}"
+            )
+
+    conn.close()
+
 USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -823,5 +853,5 @@ if __name__ == "__main__":
         interval=3600,
         first=10
     )
-
+    
     app.run_polling(drop_pending_updates=True)
