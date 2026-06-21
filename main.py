@@ -683,6 +683,13 @@ app.add_handler(
 
 app.add_handler(
     CommandHandler(
+        "done",
+        done_task
+    )
+)
+
+app.add_handler(
+    CommandHandler(
         "ai",
         ai_command
     )
