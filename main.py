@@ -370,6 +370,10 @@ app.add_handler(
     )
 )
 
+init_db()
+if __name__ == "__main__":
+    print("SAM PRO Started...")
+    app.run_polling(drop_pending_updates=True)
 if __name__ == "__main__":
     print("SAM PRO Started...")
     app.run_polling()
