@@ -636,14 +636,14 @@ app.add_handler(
 )
 
 app.add_handler(
-    CommandHandler(
-        "done",
-        done_command
-    )
+    task_conversation
 )
 
 app.add_handler(
-    task_conversation
+    CommandHandler(
+        "ai",
+        ai_command
+    )
 )
 
 app.add_handler(
@@ -653,7 +653,6 @@ app.add_handler(
         buttons
     )
 )
-
 
 if __name__ == "__main__":
 
