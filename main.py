@@ -1,3 +1,5 @@
+from openai import OpenAI
+import os
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
