@@ -33,7 +33,9 @@ import os
 
 
 TOKEN = os.getenv("BOT_TOKEN")
-
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
 CREATE_TITLE = 1
 CREATE_MEMBER = 2
