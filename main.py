@@ -31,6 +31,7 @@ from datetime import datetime
 import sqlite3
 import os
 
+USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
 client = OpenAI(
