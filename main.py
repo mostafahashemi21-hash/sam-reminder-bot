@@ -479,14 +479,15 @@ async def buttons(
 
     if text == "📋 کارها":
         await list_tasks(update, context)
-         elif text == "🤖 دستیار هوشمند":
 
-    USER_STATE[
-        update.effective_user.id
-    ] = "ai_mode"
+    elif text == "🤖 دستیار هوشمند":
 
-    await update.message.reply_text(
-        """
+        USER_STATE[
+            update.effective_user.id
+        ] = "ai_mode"
+
+        await update.message.reply_text(
+            """
 🤖 دستیار هوشمند فعال شد
 
 هر سوالی داری بنویس.
@@ -495,9 +496,9 @@ async def buttons(
 
 /exit
 """
-    )
+        )
 
-    return
+        return
 
     elif text == "👥 اعضا":
         await members(update, context)
