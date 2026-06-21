@@ -678,7 +678,52 @@ async def ai_command(update, context):
     await update.message.reply_text(answer)
 
 
+async def exit_ai(update, context):
+
+    USER_STATE.pop(
+        update.effective_user.id,
+        None
+    )
+
+    await update.message.reply_text(
+        "✅ دستیار هوشمند غیرفعال شد"
+    )
+
+
+async def ai_chat(update, context):
+
+    user_id = update.effective_user.id
+
+    if USER_STATE.get(user_id) != "ai_mode":
+        return
+
+    question = update.message.text
+
+    try:
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "user",
+                    "content": question
+                }
+            ]
+        )
+
+        answer = response.choices[0].message.content
+
+    except Exception as e:
+
+        answer = f"❌ {e}"
+
+    await update.message.reply_text(answer)
+
+
 init_db()
+
+app = (
+    Application
 
 app = (
     Application
@@ -740,6 +785,22 @@ app.add_handler(
         "ai",
         ai_command
     )
+)
+
+app.add_handler(
+    CommandHandler(
+        "exit",
+        exit_ai
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.TEXT &
+        ~filters.COMMAND,
+        ai_chat
+    ),
+    group=0
 )
 
 app.add_handler(
