@@ -593,8 +593,6 @@ async def done_task(
 
 async def ai_command(update, context):
 
-async def ai_command(update, context):
-
     question = " ".join(context.args)
 
     if not question:
