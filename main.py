@@ -631,7 +631,7 @@ async def create_task_reminder(
 {priority}
 
 یادآوری:
-{reminder_time}
+{reminder_text}
 """
     )
 
@@ -649,7 +649,7 @@ async def create_task_reminder(
 {priority}
 
 زمان یادآوری:
-{reminder_time}
+{reminder_text}
 """
         )
 
