@@ -574,17 +574,26 @@ async def ai_command(update, context):
         "🤖 در حال پردازش..."
     )
 
-    response = client.chat.completions.create(
-        model="gpt-5",
-        messages=[
-            {
-                "role": "user",
-                "content": question
-            }
-        ]
-    )
+    try:
 
-    answer = response.choices[0].message.content
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "user",
+                    "content": question
+                }
+            ]
+        )
+
+        answer = response.choices[0].message.content
+
+    except Exception as e:
+
+        answer = (
+            "❌ خطا در ارتباط با OpenAI\n\n"
+            f"{e}"
+        )
 
     await update.message.reply_text(answer)
 
