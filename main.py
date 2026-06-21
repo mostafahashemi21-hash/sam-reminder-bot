@@ -560,6 +560,35 @@ task_conversation = ConversationHandler(
 )
 
 
+async def ai_command(update, context):
+
+    question = " ".join(context.args)
+
+    if not question:
+        await update.message.reply_text(
+            "مثال:\n/ai سلام"
+        )
+        return
+
+    await update.message.reply_text(
+        "🤖 در حال پردازش..."
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-5",
+        messages=[
+            {
+                "role": "user",
+                "content": question
+            }
+        ]
+    )
+
+    answer = response.choices[0].message.content
+
+    await update.message.reply_text(answer)
+
+
 init_db()
 
 app = (
@@ -568,6 +597,7 @@ app = (
     .token(TOKEN)
     .build()
 )
+
 
 
 app.add_handler(
