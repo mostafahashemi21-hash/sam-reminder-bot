@@ -606,7 +606,6 @@ async def ai_command(update, context):
     )
 
     try:
-
         response = client.chat.completions.create(
             model="gpt-5",
             messages=[
@@ -620,7 +619,6 @@ async def ai_command(update, context):
         answer = response.choices[0].message.content
 
     except Exception as e:
-
         answer = (
             "❌ خطا در ارتباط با OpenAI\n\n"
             f"{e}"
