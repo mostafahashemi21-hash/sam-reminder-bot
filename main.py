@@ -930,6 +930,12 @@ app.add_handler(
         exit_ai
     )
 )
+app.add_handler(
+    CallbackQueryHandler(
+        task_status_callback,
+        pattern="^task_status:"
+    )
+)
 
 app.add_handler(
     MessageHandler(
