@@ -475,7 +475,7 @@ async def buttons(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-        text = update.message.text
+            text = update.message.text
 
     if text == "📋 کارها":
         await list_tasks(update, context)
@@ -524,7 +524,6 @@ async def buttons(
         await update.message.reply_text(
             "برای شروع ایجاد کار از دستور زیر استفاده کن:\n\n/newtask"
         )
-
 task_conversation = ConversationHandler(
 
     elif text == "👥 اعضا":
