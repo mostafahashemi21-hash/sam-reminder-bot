@@ -680,7 +680,7 @@ async def buttons(
     elif text == "👤 پروفایل":
         await whoami(update, context)
 
-        elif text == "➕ کار جدید":
+    elif text == "➕ کار جدید":
 
         user = get_user(
             update.effective_user.id
@@ -708,6 +708,8 @@ async def buttons(
             "برای شروع ایجاد کار از دستور زیر استفاده کن:\n\n/newtask"
         )
 
+    elif text == "⏱ پیگیری":
+        await list_tasks(update, context)
 task_conversation = ConversationHandler(
 
     entry_points=[
