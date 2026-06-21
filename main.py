@@ -32,8 +32,11 @@ from datetime import datetime
 import sqlite3
 import os
 
-from datetime import datetime
+
 async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
+
+    import sqlite3
+    from datetime import datetime
 
     conn = sqlite3.connect("sam_pro.db")
     cur = conn.cursor()
