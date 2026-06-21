@@ -64,6 +64,9 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
+
+print("BOT_TOKEN loaded:", bool(TOKEN), TOKEN[-6:] if TOKEN else "NO TOKEN")
+
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
