@@ -936,9 +936,537 @@ async def ai_chat(update, context):
         answer = f"❌ {e}"
 
     await update.message.reply_text(answer)
+SILENT_IGNORE_TEXTS = {
+    "📋 کارها",
+    "🤖 دستیار هوشمند",
+    "👥 اعضا",
+    "📊 آمار",
+    "👤 پروفایل",
+    "➕ کار جدید",
+    "⏱ پیگیری",
+    "🔴 زیاد",
+    "🟡 متوسط",
+    "🟢 کم",
+    "⏰ یک ساعت بعد",
+    "⏰ دو ساعت بعد",
+    "🕒 مشخص کردن زمان",
+    "🚫 بدون یادآوری"
+}
 
+
+def init_silent_ai_tables():
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            full_name TEXT,
+            username TEXT,
+            text TEXT,
+            created_at TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            title TEXT,
+            member_name TEXT,
+            assigned_to INTEGER,
+            priority TEXT,
+            reminder_time TEXT,
+            source_text TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def save_chat_message(update: Update):
+
+    if not update.message or not update.message.text:
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO chat_messages (
+            chat_id,
+            user_id,
+            full_name,
+            username,
+            text,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        chat.id,
+        user.id,
+        user.full_name,
+        user.username,
+        update.message.text,
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_recent_chat_messages(chat_id, limit=30):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT full_name, text, created_at
+        FROM chat_messages
+        WHERE chat_id=?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (chat_id, limit))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    rows.reverse()
+
+    return rows
+
+
+def get_admin_ids():
+
+    users = get_users()
+
+    admins = []
+
+    for user in users:
+        if user[3] == "admin":
+            admins.append(user[0])
+
+    return admins
+
+
+def extract_json_array(text):
+
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    try:
+        start = text.find("[")
+        end = text.rfind("]") + 1
+
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+
+    except:
+        pass
+
+    return []
+
+
+def save_ai_suggestion(
+    chat_id,
+    title,
+    member_name,
+    assigned_to,
+    priority,
+    reminder_time,
+    source_text
+):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id
+        FROM ai_suggestions
+        WHERE title=?
+        AND status='pending'
+        LIMIT 1
+    """, (title,))
+
+    existing = cur.fetchone()
+
+    if existing:
+        conn.close()
+        return None
+
+    cur.execute("""
+        INSERT INTO ai_suggestions (
+            chat_id,
+            title,
+            member_name,
+            assigned_to,
+            priority,
+            reminder_time,
+            source_text,
+            status,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    """, (
+        chat_id,
+        title,
+        member_name,
+        assigned_to,
+        priority,
+        reminder_time,
+        source_text,
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    ))
+
+    suggestion_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return suggestion_id
+
+
+def get_ai_suggestion(suggestion_id):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, chat_id, title, member_name, assigned_to, priority, reminder_time, source_text, status
+        FROM ai_suggestions
+        WHERE id=?
+    """, (suggestion_id,))
+
+    row = cur.fetchone()
+    conn.close()
+
+    return row
+
+
+def update_ai_suggestion_status(suggestion_id, status):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE ai_suggestions
+        SET status=?
+        WHERE id=?
+    """, (status, suggestion_id))
+
+    conn.commit()
+    conn.close()
+
+
+async def silent_ai_analyze(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    chat_id = update.effective_chat.id
+
+    messages = get_recent_chat_messages(chat_id, limit=30)
+
+    if len(messages) < 3:
+        return
+
+    history = ""
+
+    for full_name, text, created_at in messages:
+        history += f"{created_at} | {full_name}: {text}\n"
+
+    prompt = f"""
+تو دستیار مدیریت کارها هستی.
+
+از متن چت زیر، فقط کارهای واقعی و قابل پیگیری را استخراج کن.
+اگر چیزی قطعی نیست، کاری نساز.
+
+خروجی فقط JSON باشد.
+هیچ توضیح اضافه ننویس.
+
+فرمت خروجی:
+[
+  {{
+    "title": "عنوان کار",
+    "assigned_to": "نام مسئول اگر مشخص بود وگرنه خالی",
+    "priority": "🔴 زیاد یا 🟡 متوسط یا 🟢 کم",
+    "reminder_time": "none",
+    "reason": "جمله‌ای که باعث شد این کار را تشخیص بدهی"
+  }}
+]
+
+چت:
+{history}
+"""
+
+    try:
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "تو فقط JSON معتبر خروجی می‌دهی و کارهای قابل پیگیری را از چت استخراج می‌کنی."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+
+        content = response.choices[0].message.content
+
+    except Exception as e:
+        print(f"Silent AI error: {e}")
+        return
+
+    tasks = extract_json_array(content)
+
+    if not tasks:
+        return
+
+    admins = get_admin_ids()
+
+    if not admins:
+        return
+
+    for item in tasks:
+
+        title = str(item.get("title", "")).strip()
+
+        if not title:
+            continue
+
+        member_name = str(item.get("assigned_to", "")).strip()
+
+        priority = str(
+            item.get("priority", "🟡 متوسط")
+        ).strip()
+
+        if priority not in ["🔴 زیاد", "🟡 متوسط", "🟢 کم"]:
+            priority = "🟡 متوسط"
+
+        reminder_time = str(
+            item.get("reminder_time", "none")
+        ).strip()
+
+        reason = str(
+            item.get("reason", "")
+        ).strip()
+
+        assigned_to = None
+
+        if member_name:
+            assigned_to = get_member_id_by_name(member_name)
+
+        suggestion_id = save_ai_suggestion(
+            chat_id=chat_id,
+            title=title,
+            member_name=member_name,
+            assigned_to=assigned_to,
+            priority=priority,
+            reminder_time=reminder_time,
+            source_text=reason
+        )
+
+        if not suggestion_id:
+            continue
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ ثبت کار",
+                    callback_data=f"suggestion:{suggestion_id}:approve"
+                ),
+                InlineKeyboardButton(
+                    "❌ رد",
+                    callback_data=f"suggestion:{suggestion_id}:reject"
+                )
+            ]
+        ])
+
+        text = f"""
+🤖 پیشنهاد کار از چت
+
+📌 عنوان:
+{title}
+
+👤 مسئول تشخیص‌داده‌شده:
+{member_name if member_name else "نامشخص"}
+
+🔥 اولویت:
+{priority}
+
+📝 دلیل:
+{reason if reason else "-"}
+"""
+
+        for admin_id in admins:
+
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    reply_markup=keyboard
+                )
+
+            except Exception as e:
+                print(f"Send suggestion error: {e}")
+
+
+async def suggestion_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+    await query.answer()
+
+    user = get_user(query.from_user.id)
+
+    if not user or user[3] != "admin":
+        await query.edit_message_text(
+            "فقط مدیر می‌تواند این پیشنهاد را ثبت یا رد کند."
+        )
+        return
+
+    data = query.data.split(":")
+
+    if len(data) != 3:
+        await query.edit_message_text("دستور نامعتبر است.")
+        return
+
+    suggestion_id = int(data[1])
+    action = data[2]
+
+    suggestion = get_ai_suggestion(suggestion_id)
+
+    if not suggestion:
+        await query.edit_message_text("این پیشنهاد پیدا نشد.")
+        return
+
+    (
+        sid,
+        chat_id,
+        title,
+        member_name,
+        assigned_to,
+        priority,
+        reminder_time,
+        source_text,
+        status
+    ) = suggestion
+
+    if status != "pending":
+        await query.edit_message_text("این پیشنهاد قبلاً بررسی شده است.")
+        return
+
+    if action == "reject":
+
+        update_ai_suggestion_status(suggestion_id, "rejected")
+
+        await query.edit_message_text(
+            f"""
+❌ پیشنهاد رد شد
+
+📌 عنوان:
+{title}
+"""
+        )
+
+        return
+
+    if action == "approve":
+
+        if not assigned_to:
+            assigned_to = query.from_user.id
+
+        create_task(
+            title=title,
+            assigned_to=assigned_to,
+            assigned_by=query.from_user.id,
+            priority=priority,
+            reminder_time=reminder_time,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+
+        update_ai_suggestion_status(suggestion_id, "approved")
+
+        await query.edit_message_text(
+            f"""
+✅ کار ثبت شد
+
+📌 عنوان:
+{title}
+
+🔥 اولویت:
+{priority}
+"""
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=assigned_to,
+                text=f"""
+📌 کار جدید از تحلیل چت
+
+عنوان:
+{title}
+
+اولویت:
+{priority}
+"""
+            )
+        except:
+            pass
+
+
+async def silent_message_watcher(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message or not update.message.text:
+        return
+
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
+    text = update.message.text
+
+    if text in SILENT_IGNORE_TEXTS:
+        return
+
+    if USER_STATE.get(update.effective_user.id) == "ai_mode":
+        return
+
+    await register_user(update)
+
+    save_chat_message(update)
+
+    counter = context.chat_data.get("silent_counter", 0)
+    counter += 1
+
+    context.chat_data["silent_counter"] = counter
+
+    if counter >= 5:
+        context.chat_data["silent_counter"] = 0
+        await silent_ai_analyze(update, context)
 
 init_db()
+init_silent_ai_tables()
 
 app = (
     Application
