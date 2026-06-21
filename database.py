@@ -2,183 +2,176 @@ import sqlite3
 
 DB_NAME = "sam_pro.db"
 
+
 def get_connection():
     return sqlite3.connect(DB_NAME)
 
+
 def init_db():
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    full_name TEXT,
-    role TEXT DEFAULT 'member',
-    joined_at TEXT
-)
-""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        full_name TEXT,
+        role TEXT DEFAULT 'member',
+        joined_at TEXT
+    )
+    """)
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    assigned_to INTEGER,
-    assigned_by INTEGER,
-    status TEXT DEFAULT 'pending',
-    priority TEXT DEFAULT 'medium',
-    reminder_time TEXT,
-    created_at TEXT,
-    completed_at TEXT
-)
-""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        assigned_to INTEGER,
+        assigned_by INTEGER,
+        status TEXT DEFAULT 'pending',
+        priority TEXT DEFAULT 'medium',
+        reminder_time TEXT,
+        created_at TEXT,
+        completed_at TEXT
+    )
+    """)
 
-conn.commit()
-conn.close()
-```
+    conn.commit()
+    conn.close()
+
 
 def add_user(user_id, username, full_name, role, joined_at):
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-INSERT OR IGNORE INTO users
-(user_id, username, full_name, role, joined_at)
-VALUES (?, ?, ?, ?, ?)
-""", (
-    user_id,
-    username,
-    full_name,
-    role,
-    joined_at
-))
+    cur.execute("""
+    INSERT OR IGNORE INTO users
+    (user_id, username, full_name, role, joined_at)
+    VALUES (?, ?, ?, ?, ?)
+    """, (
+        user_id,
+        username,
+        full_name,
+        role,
+        joined_at
+    ))
 
-conn.commit()
-conn.close()
-```
+    conn.commit()
+    conn.close()
+
 
 def get_user(user_id):
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute(
-    "SELECT * FROM users WHERE user_id=?",
-    (user_id,)
-)
+    cur.execute(
+        "SELECT * FROM users WHERE user_id=?",
+        (user_id,)
+    )
 
-row = cur.fetchone()
+    row = cur.fetchone()
 
-conn.close()
+    conn.close()
 
-return row
-```
+    return row
+
 
 def get_users():
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-SELECT user_id,
-       username,
-       full_name,
-       role
-FROM users
-ORDER BY full_name
-""")
+    cur.execute("""
+    SELECT user_id,
+           username,
+           full_name,
+           role
+    FROM users
+    ORDER BY full_name
+    """)
 
-rows = cur.fetchall()
+    rows = cur.fetchall()
 
-conn.close()
+    conn.close()
 
-return rows
-```
+    return rows
+
 
 def count_admins():
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-SELECT COUNT(*)
-FROM users
-WHERE role='admin'
-""")
+    cur.execute("""
+    SELECT COUNT(*)
+    FROM users
+    WHERE role='admin'
+    """)
 
-count = cur.fetchone()[0]
+    count = cur.fetchone()[0]
 
-conn.close()
+    conn.close()
 
-return count
-```
+    return count
+
 
 def create_task(
-title,
-assigned_to,
-assigned_by,
-priority,
-reminder_time,
-created_at
+    title,
+    assigned_to,
+    assigned_by,
+    priority,
+    reminder_time,
+    created_at
 ):
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-INSERT INTO tasks (
-    title,
-    assigned_to,
-    assigned_by,
-    priority,
-    reminder_time,
-    created_at
-)
-VALUES (?, ?, ?, ?, ?, ?)
-""", (
-    title,
-    assigned_to,
-    assigned_by,
-    priority,
-    reminder_time,
-    created_at
-))
+    cur.execute("""
+    INSERT INTO tasks (
+        title,
+        assigned_to,
+        assigned_by,
+        priority,
+        reminder_time,
+        created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        title,
+        assigned_to,
+        assigned_by,
+        priority,
+        reminder_time,
+        created_at
+    ))
 
-conn.commit()
-conn.close()
-```
+    conn.commit()
+    conn.close()
+
 
 def get_tasks():
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-SELECT *
-FROM tasks
-ORDER BY id DESC
-""")
+    cur.execute("""
+    SELECT *
+    FROM tasks
+    ORDER BY id DESC
+    """)
 
-rows = cur.fetchall()
+    rows = cur.fetchall()
 
-conn.close()
+    conn.close()
 
-return rows
-```
+    return rows
+
 
 def complete_task(task_id):
-conn = get_connection()
-cur = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-```
-cur.execute("""
-UPDATE tasks
-SET status='done'
-WHERE id=?
-""", (task_id,))
+    cur.execute("""
+    UPDATE tasks
+    SET status='done'
+    WHERE id=?
+    """, (task_id,))
 
-conn.commit()
-conn.close()
-```
+    conn.commit()
+    conn.close()
