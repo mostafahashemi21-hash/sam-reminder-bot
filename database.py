@@ -3,7 +3,7 @@ import sqlite3
 DB_NAME = "sam_pro.db"
 
 def get_connection():
-return sqlite3.connect(DB_NAME)
+    return sqlite3.connect(DB_NAME)
 
 def init_db():
 conn = get_connection()
