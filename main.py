@@ -577,15 +577,21 @@ async def create_task_reminder(
 
         reminder_time = "none"
 
-    else:
+        else:
 
         await update.message.reply_text(
             "لطفاً یکی از دکمه‌ها را انتخاب کن."
         )
 
         return CREATE_REMINDER
-    title = context.user_data["title"]
 
+    reminder_text = (
+        "بدون یادآوری"
+        if reminder_time == "none"
+        else reminder_time
+    )
+
+    title = context.user_data["title"]
     member_name = (
         context.user_data["member"]
     )
