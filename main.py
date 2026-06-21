@@ -109,7 +109,8 @@ async def start(
     ["🤖 دستیار هوشمند"],
     ["👥 اعضا"],
     ["📊 آمار"],
-    ["👤 پروفایل"]
+    ["👤 پروفایل"],
+    ["⏱ پیگیری"]
 ]
     await update.message.reply_text(
         "🤖 SAM PRO Team Manager",
