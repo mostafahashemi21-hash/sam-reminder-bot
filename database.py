@@ -38,7 +38,7 @@ conn.commit()
 conn.close()
 ```
 
-def add_user(user_id, username, full_name, role="member", joined_at=""):
+def add_user(user_id, username, full_name, role, joined_at):
 conn = get_connection()
 cur = conn.cursor()
 
@@ -47,7 +47,13 @@ cur.execute("""
 INSERT OR IGNORE INTO users
 (user_id, username, full_name, role, joined_at)
 VALUES (?, ?, ?, ?, ?)
-""", (user_id, username, full_name, role, joined_at))
+""", (
+    user_id,
+    username,
+    full_name,
+    role,
+    joined_at
+))
 
 conn.commit()
 conn.close()
@@ -64,6 +70,7 @@ cur.execute(
 )
 
 row = cur.fetchone()
+
 conn.close()
 
 return row
@@ -75,12 +82,16 @@ cur = conn.cursor()
 
 ```
 cur.execute("""
-SELECT user_id, username, full_name, role
+SELECT user_id,
+       username,
+       full_name,
+       role
 FROM users
 ORDER BY full_name
 """)
 
 rows = cur.fetchall()
+
 conn.close()
 
 return rows
@@ -102,4 +113,72 @@ count = cur.fetchone()[0]
 conn.close()
 
 return count
+```
+
+def create_task(
+title,
+assigned_to,
+assigned_by,
+priority,
+reminder_time,
+created_at
+):
+conn = get_connection()
+cur = conn.cursor()
+
+```
+cur.execute("""
+INSERT INTO tasks (
+    title,
+    assigned_to,
+    assigned_by,
+    priority,
+    reminder_time,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?)
+""", (
+    title,
+    assigned_to,
+    assigned_by,
+    priority,
+    reminder_time,
+    created_at
+))
+
+conn.commit()
+conn.close()
+```
+
+def get_tasks():
+conn = get_connection()
+cur = conn.cursor()
+
+```
+cur.execute("""
+SELECT *
+FROM tasks
+ORDER BY id DESC
+""")
+
+rows = cur.fetchall()
+
+conn.close()
+
+return rows
+```
+
+def complete_task(task_id):
+conn = get_connection()
+cur = conn.cursor()
+
+```
+cur.execute("""
+UPDATE tasks
+SET status='done'
+WHERE id=?
+""", (task_id,))
+
+conn.commit()
+conn.close()
 ```
