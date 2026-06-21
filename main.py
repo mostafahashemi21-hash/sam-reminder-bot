@@ -559,6 +559,39 @@ task_conversation = ConversationHandler(
     ]
 )
 
+async def done_task(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "مثال:\n/done 1"
+        )
+
+        return
+
+    try:
+
+        task_id = int(
+            context.args[0]
+        )
+
+        complete_task(task_id)
+
+        await update.message.reply_text(
+            "✅ کار انجام شد"
+        )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"خطا:\n{e}"
+        )
+
+
+async def ai_command(update, context):
 
 async def ai_command(update, context):
 
