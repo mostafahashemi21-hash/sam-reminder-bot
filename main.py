@@ -33,10 +33,7 @@ import sqlite3
 import os
 
 from datetime import datetime
-import sqlite3
-async def check_tasks(context):
-    import sqlite3
-    from datetime import datetime
+async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("sam_pro.db")
     cur = conn.cursor()
@@ -61,7 +58,6 @@ async def check_tasks(context):
             )
 
     conn.close()
-
 USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
