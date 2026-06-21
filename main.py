@@ -759,19 +759,52 @@ app.add_handler(
 
 app.add_handler(
     MessageHandler(
-        filters.TEXT &
-        ~filters.COMMAND,
-        ai_chat
-    ),
-    group=0
+        filters.Regex("^📋 کارها$"),
+        buttons
+    )
 )
 
 app.add_handler(
     MessageHandler(
-        filters.TEXT &
-        ~filters.COMMAND,
+        filters.Regex("^🤖 دستیار هوشمند$"),
         buttons
     )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^👥 اعضا$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^📊 آمار$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^👤 پروفایل$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^➕ کار جدید$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        ai_chat
+    ),
+    group=1
 )
 
 if __name__ == "__main__":
