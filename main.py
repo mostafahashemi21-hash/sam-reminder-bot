@@ -848,10 +848,10 @@ if __name__ == "__main__":
 
     job_queue = app.job_queue
 
-    job_queue.run_repeating(
-        check_tasks,
-        interval=3600,
-        first=10
-    )
-    
-    app.run_polling(drop_pending_updates=True)
+job_queue.run_repeating(
+    check_tasks,
+    interval=60,
+    first=10
+)
+
+app.run_polling(drop_pending_updates=True)
