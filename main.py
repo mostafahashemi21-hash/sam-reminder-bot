@@ -646,6 +646,8 @@ async def buttons(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    await register_user(update)
+
     text = update.message.text
 
     if text == "📋 کارها":
@@ -678,11 +680,21 @@ async def buttons(
     elif text == "👤 پروفایل":
         await whoami(update, context)
 
-    elif text == "➕ کار جدید":
-        
+        elif text == "➕ کار جدید":
+
         user = get_user(
             update.effective_user.id
         )
+
+        if not user:
+            await register_user(update)
+            user = get_user(update.effective_user.id)
+
+        if not user:
+            await update.message.reply_text(
+                "اول /start را بزن."
+            )
+            return
 
         if user[3] != "admin":
 
