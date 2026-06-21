@@ -36,34 +36,86 @@ import sqlite3
 import os
 
 
-async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
+STATUS_TEXT = {
+    "pending": "⏳ باز",
+    "in_progress": "🔄 در حال پیگیری",
+    "waiting": "⏳ منتظر پاسخ",
+    "done": "✅ انجام شد",
+    "cancelled": "⛔ لغو شد"
+}
 
-    import sqlite3
-    from datetime import datetime
+
+async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("sam_pro.db")
     cur = conn.cursor()
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
     cur.execute("""
-        SELECT id, title, assigned_to, reminder_time
+        SELECT id, title, assigned_to, assigned_by, priority, status
         FROM tasks
-        WHERE status != 'done'
+        WHERE status NOT IN ('done', 'cancelled')
     """)
 
     tasks = cur.fetchall()
+    conn.close()
 
     for task in tasks:
-        task_id, title, assigned_to, reminder_time = task
 
-        if reminder_time == now:
+        task_id, title, assigned_to, assigned_by, priority, status = task
+
+        status_fa = STATUS_TEXT.get(status, "⏳ باز")
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔄 در حال پیگیری",
+                    callback_data=f"task_status:{task_id}:in_progress"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⏳ منتظر پاسخ",
+                    callback_data=f"task_status:{task_id}:waiting"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✅ انجام شد",
+                    callback_data=f"task_status:{task_id}:done"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⛔ لغو شد",
+                    callback_data=f"task_status:{task_id}:cancelled"
+                )
+            ]
+        ])
+
+        try:
             await context.bot.send_message(
                 chat_id=assigned_to,
-                text=f"⏰ یادآوری کار:\n\n{title}"
+                text=f"""
+⏰ یادآوری کار انجام‌نشده
+
+🆔 شناسه کار: {task_id}
+
+📌 عنوان:
+{title}
+
+🔥 اولویت:
+{priority}
+
+📍 وضعیت فعلی:
+{status_fa}
+
+لطفاً وضعیت کار را مشخص کن:
+""",
+                reply_markup=keyboard
             )
 
-    conn.close()
+        except Exception as e:
+            print(f"Reminder send error for task {task_id}: {e}")
 USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
