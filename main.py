@@ -690,11 +690,7 @@ async def ai_chat(update, context):
 init_db()
 
 app = (
-    Application
-
-app = (
-    Application
-    .builder()
+    Application.builder()
     .token(TOKEN)
     .build()
 )
