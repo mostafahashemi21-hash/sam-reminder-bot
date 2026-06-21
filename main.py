@@ -464,3 +464,169 @@ async def done_command(
     await update.message.reply_text(
         "✅ کار انجام شد."
     )
+
+async def buttons(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    text = update.message.text
+
+    if text == "📋 کارها":
+        await list_tasks(update, context)
+
+    elif text == "👥 اعضا":
+        await members(update, context)
+
+    elif text == "📊 آمار":
+        await stats(update, context)
+
+    elif text == "👤 پروفایل":
+        await whoami(update, context)
+
+    elif text == "➕ کار جدید":
+
+        user = get_user(
+            update.effective_user.id
+        )
+
+        if user[3] != "admin":
+
+            await update.message.reply_text(
+                "فقط مدیر می‌تواند کار ایجاد کند."
+            )
+
+            return
+
+        await update.message.reply_text(
+            "برای شروع ایجاد کار از دستور زیر استفاده کن:\n\n/newtask"
+        )
+
+
+task_conversation = ConversationHandler(
+
+    entry_points=[
+        CommandHandler(
+            "newtask",
+            create_task_start
+        )
+    ],
+
+    states={
+
+        CREATE_TITLE: [
+            MessageHandler(
+                filters.TEXT &
+                ~filters.COMMAND,
+                create_task_title
+            )
+        ],
+
+        CREATE_MEMBER: [
+            MessageHandler(
+                filters.TEXT &
+                ~filters.COMMAND,
+                create_task_member
+            )
+        ],
+
+        CREATE_PRIORITY: [
+            MessageHandler(
+                filters.TEXT &
+                ~filters.COMMAND,
+                create_task_priority
+            )
+        ],
+
+        CREATE_REMINDER: [
+            MessageHandler(
+                filters.TEXT &
+                ~filters.COMMAND,
+                create_task_reminder
+            )
+        ]
+    },
+
+    fallbacks=[
+        CommandHandler(
+            "cancel",
+            cancel_task
+        )
+    ]
+)
+
+
+init_db()
+
+app = (
+    Application
+    .builder()
+    .token(TOKEN)
+    .build()
+)
+
+
+app.add_handler(
+    CommandHandler(
+        "start",
+        start
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "whoami",
+        whoami
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "members",
+        members
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "tasks",
+        list_tasks
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "stats",
+        stats
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "done",
+        done_command
+    )
+)
+
+app.add_handler(
+    task_conversation
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.TEXT &
+        ~filters.COMMAND,
+        buttons
+    )
+)
+
+
+if __name__ == "__main__":
+
+    print(
+        "SAM PRO Team Manager Started..."
+    )
+
+    app.run_polling(
+        drop_pending_updates=True
+    )
