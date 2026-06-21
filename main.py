@@ -475,7 +475,7 @@ async def buttons(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-            text = update.message.text
+    text = update.message.text
 
     if text == "📋 کارها":
         await list_tasks(update, context)
@@ -508,7 +508,7 @@ async def buttons(
         await whoami(update, context)
 
     elif text == "➕ کار جدید":
-
+        ...
         user = get_user(
             update.effective_user.id
         )
