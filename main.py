@@ -1,3 +1,4 @@
+from database import init_db
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
