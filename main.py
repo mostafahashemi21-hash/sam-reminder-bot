@@ -103,13 +103,13 @@ async def start(
     await register_user(update)
 
     keyboard = [
-        ["➕ کار جدید"],
-        ["📋 کارها"],
-        ["👥 اعضا"],
-        ["📊 آمار"],
-        ["👤 پروفایل"]
-    ]
-
+    ["➕ کار جدید"],
+    ["📋 کارها"],
+    ["🤖 دستیار هوشمند"],
+    ["👥 اعضا"],
+    ["📊 آمار"],
+    ["👤 پروفایل"]
+]
     await update.message.reply_text(
         "🤖 SAM PRO Team Manager",
         reply_markup=ReplyKeyboardMarkup(
