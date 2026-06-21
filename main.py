@@ -1,286 +1,182 @@
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
+
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters
+)
+
 from database import (
     init_db,
     add_user,
     get_user,
     get_users,
-    count_admins
-)
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters
+    count_admins,
+    create_task,
+    get_tasks,
+    complete_task
 )
 
-import os
-import json
 from datetime import datetime
 
+import sqlite3
+import os
+
+
 TOKEN = os.getenv("BOT_TOKEN")
-TASKS_FILE = "tasks.json"
 
 
-def load_tasks():
-    if not os.path.exists(TASKS_FILE):
-        return []
-
-    try:
-        with open(TASKS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return []
+CREATE_TITLE = 1
+CREATE_MEMBER = 2
+CREATE_PRIORITY = 3
+CREATE_REMINDER = 4
 
 
-def save_tasks(tasks):
-    with open(TASKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
+def db():
+    return sqlite3.connect("sam_pro.db")
 
 
-def get_next_id(tasks):
-    if not tasks:
-        return 1
+def get_member_id_by_name(name):
 
-    return max(task["id"] for task in tasks) + 1
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT user_id
+        FROM users
+        WHERE full_name=?
+        """,
+        (name,)
+    )
+
+    row = cur.fetchone()
+
+    conn.close()
+
+    if row:
+        return row[0]
+
+    return None
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def register_user(update: Update):
+
+    tg_user = update.effective_user
+
+    existing = get_user(tg_user.id)
+
+    if existing:
+        return
+
+    role = "member"
+
+    if count_admins() == 0:
+        role = "admin"
+
+    add_user(
+        tg_user.id,
+        tg_user.username,
+        tg_user.full_name,
+        role,
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    )
+
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await register_user(update)
 
     keyboard = [
-        ["➕ کار جدید", "📋 کارها"],
-        ["🔎 جستجو", "📊 آمار"],
-        ["❓ راهنما"]
+        ["➕ کار جدید"],
+        ["📋 کارها"],
+        ["👥 اعضا"],
+        ["📊 آمار"],
+        ["👤 پروفایل"]
     ]
 
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True
-    )
-
     await update.message.reply_text(
-        """
-🤖 SAM PRO
-
-سیستم مدیریت کارها
-
-دستورات مهم:
-
-/newtask متن کار
-/tasks
-/done شماره
-/delete شماره
-/search کلمه
-/stats
-""",
-        reply_markup=reply_markup
+        "🤖 SAM PRO Team Manager",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True
+        )
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def whoami(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = get_user(
+        update.effective_user.id
+    )
+
+    if not user:
+        return
+
+    role = (
+        "👑 مدیر"
+        if user[3] == "admin"
+        else "👤 عضو"
+    )
 
     await update.message.reply_text(
-        """
-📘 راهنما
+        f"""
+{role}
 
-➕ افزودن کار:
-/newtask تماس با مشتری
+نام:
+{user[2]}
 
-📋 نمایش کارها:
-/tasks
-
-✅ اتمام کار:
-/done 1
-
-🗑 حذف:
-/delete 1
-
-🔎 جستجو:
-/search مشتری
-
-📊 آمار:
-/stats
+یوزرنیم:
+@{user[1] if user[1] else "-"}
 """
     )
 
 
-async def newtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def members(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    text = " ".join(context.args)
+    users = get_users()
 
-    if not text:
-        await update.message.reply_text(
-            "مثال:\n/newtask خرید لپتاپ"
+    text = "👥 اعضا\n\n"
+
+    for user in users:
+
+        role = (
+            "👑"
+            if user[3] == "admin"
+            else "👤"
         )
-        return
 
-    tasks = load_tasks()
-
-    task = {
-        "id": get_next_id(tasks),
-        "title": text,
-        "status": "pending",
-        "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-    }
-
-    tasks.append(task)
-    save_tasks(tasks)
+        text += (
+            f"{role} {user[2]}\n"
+        )
 
     await update.message.reply_text(
-        f"✅ کار ثبت شد\n\n{text}"
+        text
     )
 
 
-async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    tasks = load_tasks()
-
-    if not tasks:
-        await update.message.reply_text(
-            "📭 هیچ کاری ثبت نشده"
-        )
-        return
-
-    msg = "📋 لیست کارها\n\n"
-
-    for task in tasks:
-
-        status = (
-            "✅"
-            if task["status"] == "done"
-            else "⏳"
-        )
-
-        msg += (
-            f"{task['id']}. {status} {task['title']}\n"
-            f"📅 {task['created']}\n\n"
-        )
-
-    await update.message.reply_text(msg)
-
-
-async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not context.args:
-        await update.message.reply_text(
-            "مثال:\n/done 1"
-        )
-        return
-
-    try:
-        task_id = int(context.args[0])
-    except:
-        await update.message.reply_text(
-            "شناسه نامعتبر است"
-        )
-        return
-
-    tasks = load_tasks()
-
-    found = False
-
-    for task in tasks:
-
-        if task["id"] == task_id:
-
-            task["status"] = "done"
-            found = True
-            break
-
-    save_tasks(tasks)
-
-    if found:
-        await update.message.reply_text(
-            "✅ کار انجام شد"
-        )
-    else:
-        await update.message.reply_text(
-            "کار پیدا نشد"
-        )
-
-
-async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not context.args:
-        await update.message.reply_text(
-            "مثال:\n/delete 1"
-        )
-        return
-
-    try:
-        task_id = int(context.args[0])
-    except:
-        await update.message.reply_text(
-            "شناسه نامعتبر است"
-        )
-        return
-
-    tasks = load_tasks()
-
-    new_tasks = [
-        t for t in tasks
-        if t["id"] != task_id
-    ]
-
-    if len(tasks) == len(new_tasks):
-        await update.message.reply_text(
-            "کار پیدا نشد"
-        )
-        return
-
-    save_tasks(new_tasks)
-
-    await update.message.reply_text(
-        "🗑 کار حذف شد"
-    )
-
-
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = " ".join(context.args)
-
-    if not query:
-        await update.message.reply_text(
-            "مثال:\n/search مشتری"
-        )
-        return
-
-    tasks = load_tasks()
-
-    result = []
-
-    for task in tasks:
-
-        if query.lower() in task["title"].lower():
-            result.append(task)
-
-    if not result:
-        await update.message.reply_text(
-            "چیزی پیدا نشد"
-        )
-        return
-
-    msg = "🔎 نتایج جستجو\n\n"
-
-    for task in result:
-
-        status = (
-            "✅"
-            if task["status"] == "done"
-            else "⏳"
-        )
-
-        msg += (
-            f"{task['id']}. {status} "
-            f"{task['title']}\n"
-        )
-
-    await update.message.reply_text(msg)
-
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    tasks = load_tasks()
+    tasks = get_tasks()
 
     total = len(tasks)
 
@@ -288,7 +184,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             t
             for t in tasks
-            if t["status"] == "done"
+            if t[4] == "done"
         ]
     )
 
@@ -307,76 +203,264 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def buttons(
+async def list_tasks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    text = update.message.text
+    tasks = get_tasks()
 
-    if text == "📋 کارها":
-        await tasks_command(update, context)
+    if not tasks:
 
-    elif text == "📊 آمار":
-        await stats(update, context)
-
-    elif text == "❓ راهنما":
-        await help_command(update, context)
-
-    elif text == "➕ کار جدید":
         await update.message.reply_text(
-            "دستور زیر را وارد کن:\n\n/newtask عنوان کار"
+            "هیچ کاری ثبت نشده"
         )
 
-    elif text == "🔎 جستجو":
-        await update.message.reply_text(
-            "مثال:\n/search مشتری"
+        return
+
+    msg = "📋 لیست کارها\n\n"
+
+    for task in tasks:
+
+        status = (
+            "✅"
+            if task[4] == "done"
+            else "⏳"
         )
 
+        msg += (
+            f"{task[0]}. "
+            f"{status} "
+            f"{task[1]}\n"
+        )
 
-app = Application.builder().token(TOKEN).build()
-
-app.add_handler(
-    CommandHandler("start", start)
-)
-
-app.add_handler(
-    CommandHandler("help", help_command)
-)
-
-app.add_handler(
-    CommandHandler("newtask", newtask)
-)
-
-app.add_handler(
-    CommandHandler("tasks", tasks_command)
-)
-
-app.add_handler(
-    CommandHandler("done", done)
-)
-
-app.add_handler(
-    CommandHandler("delete", delete)
-)
-
-app.add_handler(
-    CommandHandler("search", search)
-)
-
-app.add_handler(
-    CommandHandler("stats", stats)
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        buttons
+    await update.message.reply_text(
+        msg
     )
-)
+async def create_task_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-init_db()
-if __name__ == "__main__":
-    print("SAM PRO Started...")
-    app.run_polling(drop_pending_updates=True)
+    user = get_user(
+        update.effective_user.id
+    )
 
+    if user[3] != "admin":
+
+        await update.message.reply_text(
+            "فقط مدیر می‌تواند کار ایجاد کند."
+        )
+
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "📝 عنوان کار را وارد کن:"
+    )
+
+    return CREATE_TITLE
+
+
+async def create_task_title(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    context.user_data["title"] = (
+        update.message.text
+    )
+
+    users = get_users()
+
+    keyboard = []
+
+    for user in users:
+
+        keyboard.append(
+            [KeyboardButton(user[2])]
+        )
+
+    await update.message.reply_text(
+        "👤 مسئول انجام کار را انتخاب کن:",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+    )
+
+    return CREATE_MEMBER
+
+
+async def create_task_member(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    context.user_data["member"] = (
+        update.message.text
+    )
+
+    keyboard = [
+        ["🔴 زیاد"],
+        ["🟡 متوسط"],
+        ["🟢 کم"]
+    ]
+
+    await update.message.reply_text(
+        "اولویت را انتخاب کن:",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+    )
+
+    return CREATE_PRIORITY
+
+
+async def create_task_priority(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    context.user_data["priority"] = (
+        update.message.text
+    )
+
+    await update.message.reply_text(
+        """
+⏰ زمان یادآوری را وارد کن
+
+مثال:
+
+2026-06-25 18:00
+"""
+    )
+
+    return CREATE_REMINDER
+
+
+async def create_task_reminder(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    reminder_time = (
+        update.message.text
+    )
+
+    title = context.user_data["title"]
+
+    member_name = (
+        context.user_data["member"]
+    )
+
+    priority = (
+        context.user_data["priority"]
+    )
+
+    assigned_to = (
+        get_member_id_by_name(
+            member_name
+        )
+    )
+
+    create_task(
+        title=title,
+        assigned_to=assigned_to,
+        assigned_by=update.effective_user.id,
+        priority=priority,
+        reminder_time=reminder_time,
+        created_at=datetime.now().strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
+
+    await update.message.reply_text(
+        f"""
+✅ کار ثبت شد
+
+عنوان:
+{title}
+
+مسئول:
+{member_name}
+
+اولویت:
+{priority}
+
+یادآوری:
+{reminder_time}
+"""
+    )
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=assigned_to,
+            text=f"""
+📌 کار جدید
+
+عنوان:
+{title}
+
+اولویت:
+{priority}
+
+زمان یادآوری:
+{reminder_time}
+"""
+        )
+
+    except:
+
+        pass
+
+    return ConversationHandler.END
+
+
+async def cancel_task(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "عملیات لغو شد."
+    )
+
+    return ConversationHandler.END
+
+
+async def done_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "مثال:\n/done 1"
+        )
+
+        return
+
+    try:
+
+        task_id = int(
+            context.args[0]
+        )
+
+    except:
+
+        await update.message.reply_text(
+            "شناسه نامعتبر است."
+        )
+
+        return
+
+    complete_task(task_id)
+
+    await update.message.reply_text(
+        "✅ کار انجام شد."
+    )
