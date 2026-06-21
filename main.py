@@ -508,7 +508,7 @@ async def buttons(
         await whoami(update, context)
 
     elif text == "➕ کار جدید":
-        ...
+        
         user = get_user(
             update.effective_user.id
         )
