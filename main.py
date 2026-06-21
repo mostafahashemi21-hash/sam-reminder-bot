@@ -814,8 +814,14 @@ app.add_handler(
 
 if __name__ == "__main__":
 
-    print(
-        "SAM PRO Team Manager Started..."
+    print("SAM PRO Team Manager Started...")
+
+    job_queue = app.job_queue
+
+    job_queue.run_repeating(
+        check_tasks,
+        interval=3600,
+        first=10
     )
 
     app.run_polling(
