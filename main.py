@@ -12,7 +12,6 @@ import os
 import json
 from datetime import datetime
 
-print(os.environ)
 TOKEN = os.getenv("BOT_TOKEN")
 TASKS_FILE = "tasks.json"
 
@@ -374,6 +373,4 @@ init_db()
 if __name__ == "__main__":
     print("SAM PRO Started...")
     app.run_polling(drop_pending_updates=True)
-if __name__ == "__main__":
-    print("SAM PRO Started...")
-    app.run_polling()
+
