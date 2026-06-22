@@ -2867,7 +2867,17 @@ async def voice_task_handler(
                 file=audio_file
             )
 
-        transcript = transcript_response.text
+                transcript = transcript_response.text
+
+        handled = await handle_voice_command(
+            update,
+            context,
+            transcript
+        )
+
+        if handled:
+            context.user_data.pop("waiting_voice_task", None)
+            return
 
     except Exception as e:
 
