@@ -811,6 +811,28 @@ async def buttons(
 
         await open_task_panel(update, context)
         return
+    elif text == "🎙 کار با ویس":
+
+        context.user_data["waiting_voice_task"] = True
+
+        await update.message.reply_text(
+            """
+🎙 ساخت کار با ویس فعال شد
+
+حالا یک ویس بفرست و داخلش بگو:
+
+- عنوان کار چیست
+- مسئول کیست
+- اولویت چقدر است
+- پروژه یا دسته‌بندی چیست
+- یادآوری چه زمانی باشد
+
+مثال:
+رضا فردا قیمت چوب روسیه را پیگیری کند، اولویت بالا، پروژه چوب، دسته‌بندی پیگیری
+"""
+        )
+
+        return
 task_conversation = ConversationHandler(
 
     entry_points=[
