@@ -301,6 +301,16 @@ def chat_is_group(update: Update) -> bool:
     return bool(c and c.type in {"group", "supergroup"})
 
 
+def chat_is_channel(update: Update) -> bool:
+    c = update.effective_chat
+    return bool(c and c.type == "channel")
+
+
+def chat_is_public(update: Update) -> bool:
+    c = update.effective_chat
+    return bool(c and c.type in {"group", "supergroup", "channel"})
+
+
 def back_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True, one_time_keyboard=False)
 
@@ -539,6 +549,7 @@ def is_status_text(text: str) -> bool:
     keywords = [
         "✅", "⏳", "در حال", "ثبت شد", "ذخیره شد", "انجام شد", "لغو شد", "حذف شد", "برگشت", "رد شد",
         "فرمان واضح نبود", "فرمت زمان", "کار پیدا نشد", "ملاقات پیدا نشد", "OPENAI_API_KEY", "فایل ثبت شد",
+        "منوی پایین فعال شد", "منوی تصویری آماده شد", "از این منو استفاده کن",
     ]
     return any(k in str(text) or k in t for k in keywords)
 
@@ -630,24 +641,62 @@ async def delete_user_message_if_possible(update: Update) -> None:
         pass
 
 async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = "منوی اصلی آماده است.") -> None:
-    # Home/back must turn off GPT/Agent modes too; otherwise every normal text is treated as a command.
+    """Show home in a way that works in private, groups and channels.
+
+    Private/group chats get the bottom ReplyKeyboard (the visual lower menu).
+    Public chats also get a pinned-friendly Inline menu because channel posts and
+    many group clients do not reliably expose bot reply keyboards to everyone.
+    """
     context.user_data.pop("mode", None)
     context.user_data.pop("state", None)
     context.user_data.pop("draft_task", None)
     context.user_data.pop("draft_meeting", None)
     context.user_data.pop("pending_actions", None)
     context.user_data.pop("pending_comment", None)
+
+    if chat_is_channel(update):
+        await safe_reply(
+            update,
+            f"🤖 <b>SAM PRO Team Manager</b>\n{html(text)}\n\nاین پیام را در کانال Pin کن و از دکمه‌های زیر استفاده کن.",
+            reply_markup=main_inline_keyboard(),
+        )
+        return
+
     if chat_is_group(update):
-        await safe_reply(update, f"🏠 <b>{html(text)}</b>\nدر گروه از دکمه‌های همین پیام استفاده کن.", reply_markup=main_inline_keyboard())
-    else:
-        await safe_reply(update, f"🏠 {html(text)}", reply_markup=main_keyboard())
-        await safe_reply(update, "🏠 <b>منوی تصویری</b>", reply_markup=main_inline_keyboard())
+        # 1) Activate the lower visual keyboard for users in the group.
+        # This message is short and is auto-deleted if AUTO_DELETE_BOT_STATUS is true.
+        await temp_reply(update, context, "⌨️ منوی پایین فعال شد", reply_markup=main_keyboard(), seconds=STATUS_DELETE_SECONDS)
+        # 2) Also send inline pinned menu. Inline buttons never type text into the group.
+        await safe_reply(
+            update,
+            f"🤖 <b>SAM PRO Team Manager</b>\n{html(text)}\n\nبرای گروه بهتر است این منوی تصویری را Pin کنی.",
+            reply_markup=main_inline_keyboard(),
+        )
+        return
+
+    # Private chat: keep the bottom keyboard and also show an inline card.
+    await safe_reply(update, f"🏠 {html(text)}", reply_markup=main_keyboard())
+    await safe_reply(update, "🤖 <b>منوی تصویری</b>", reply_markup=main_inline_keyboard())
 
 
 # ----------------------- commands -----------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await register_user(update, private=(update.effective_chat.type == "private" if update.effective_chat else False))
     await show_home(update, context, "SAM PRO Team Manager")
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update, private=(update.effective_chat.type == "private" if update.effective_chat else False))
+    await show_home(update, context, "منو آماده است")
+
+
+async def post_menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Post only the inline menu; useful for channels and for pinning in groups."""
+    await safe_reply(
+        update,
+        "🤖 <b>SAM PRO Team Manager</b>\nمنوی تصویری آماده شد. این پیام را Pin کن.",
+        reply_markup=main_inline_keyboard(),
+    )
 
 
 async def exit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2132,6 +2181,8 @@ def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
     # commands
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("post_menu", post_menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("exit", exit_cmd))
     app.add_handler(CommandHandler("cancel", exit_cmd))
