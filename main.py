@@ -1473,6 +1473,141 @@ async def silent_message_watcher(
     if counter >= 5:
         context.chat_data["silent_counter"] = 0
         await silent_ai_analyze(update, context)
+    def get_chat_messages_between(chat_id, start_time, end_time):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT full_name, text, created_at
+        FROM chat_messages
+        WHERE chat_id=?
+        AND created_at >= ?
+        AND created_at <= ?
+        ORDER BY id ASC
+    """, (
+        chat_id,
+        start_time.strftime("%Y-%m-%d %H:%M"),
+        end_time.strftime("%Y-%m-%d %H:%M")
+    ))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return rows
+
+
+def resolve_summary_range(text):
+
+    now = datetime.now()
+
+    text = text.lower()
+
+    if "1h" in text or "یک ساعت" in text or "۱ ساعت" in text:
+        return now - timedelta(hours=1), now, "یک ساعت اخیر"
+
+    if "2h" in text or "دو ساعت" in text or "۲ ساعت" in text:
+        return now - timedelta(hours=2), now, "دو ساعت اخیر"
+
+    if "yesterday" in text or "دیروز" in text:
+        yesterday = now - timedelta(days=1)
+
+        start = yesterday.replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        end = yesterday.replace(
+            hour=23,
+            minute=59,
+            second=0,
+            microsecond=0
+        )
+
+        return start, end, "دیروز"
+
+    if "7d" in text or "هفته" in text or "۷ روز" in text or "7 روز" in text:
+        return now - timedelta(days=7), now, "۷ روز اخیر"
+
+    return now - timedelta(hours=1), now, "یک ساعت اخیر"
+
+
+async def summary_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    chat_id = update.effective_chat.id
+
+    query_text = " ".join(context.args)
+
+    if not query_text:
+        query_text = "1h"
+
+    start_time, end_time, label = resolve_summary_range(query_text)
+
+    messages = get_chat_messages_between(
+        chat_id,
+        start_time,
+        end_time
+    )
+
+    if not messages:
+        await update.message.reply_text(
+            f"برای بازه «{label}» پیامی ذخیره نشده."
+        )
+        return
+
+    history = ""
+
+    for full_name, text, created_at in messages:
+        history += f"{created_at} | {full_name}: {text}\n"
+
+    await update.message.reply_text(
+        "⏳ در حال خلاصه‌سازی چت..."
+    )
+
+    prompt = f"""
+چت زیر مربوط به بازه {label} است.
+
+لطفاً خلاصه دقیق و کاربردی بده:
+
+1. خلاصه کلی بحث
+2. تصمیم‌های گرفته‌شده
+3. کارهای قابل پیگیری
+4. مسئول هر کار اگر مشخص است
+5. نکات مهم
+6. ریسک‌ها یا موارد مبهم
+
+متن چت:
+{history}
+"""
+
+    try:
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "تو دستیار خلاصه‌سازی و مدیریت کارها هستی. پاسخ را فارسی، مرتب و خلاصه بده."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+
+        answer = response.choices[0].message.content
+
+    except Exception as e:
+
+        answer = f"❌ خطا در خلاصه‌سازی:\n{e}"
+
+    await update.message.reply_text(answer)    
 
 init_db()
 init_silent_ai_tables()
