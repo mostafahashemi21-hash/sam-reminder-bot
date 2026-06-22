@@ -2859,15 +2859,16 @@ async def voice_task_handler(
 
     await file.download_to_drive(file_path)
 
-    try:
+        try:
 
         with open(file_path, "rb") as audio_file:
+
             transcript_response = client.audio.transcriptions.create(
                 model="gpt-4o-mini-transcribe",
                 file=audio_file
             )
 
-                transcript = transcript_response.text
+        transcript = transcript_response.text
 
         handled = await handle_voice_command(
             update,
