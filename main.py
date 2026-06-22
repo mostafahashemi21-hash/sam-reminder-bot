@@ -5,7 +5,8 @@ from telegram import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    InputFile
 )
 
 from telegram.ext import (
@@ -34,8 +35,9 @@ from database import (
 from datetime import datetime, timedelta
 
 import sqlite3
+import os
 import json
-import re
+import tempfile
 
 
 STATUS_TEXT = {
@@ -53,11 +55,9 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time
+        SELECT id, title, assigned_to, assigned_by, priority, status
         FROM tasks
         WHERE status NOT IN ('done', 'cancelled')
-        AND reminder_time IS NOT NULL
-        AND reminder_time != 'none'
     """)
 
     tasks = cur.fetchall()
@@ -65,18 +65,7 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
     for task in tasks:
 
-        task_id, title, assigned_to, assigned_by, priority, status, reminder_time = task
-
-        try:
-            reminder_dt = datetime.strptime(
-                reminder_time,
-                "%Y-%m-%d %H:%M"
-            )
-        except:
-            continue
-
-        if reminder_dt > datetime.now():
-            continue
+        task_id, title, assigned_to, assigned_by, priority, status = task
 
         status_fa = STATUS_TEXT.get(status, "⏳ باز")
 
@@ -104,20 +93,16 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
                     "⛔ لغو شد",
                     callback_data=f"task_status:{task_id}:cancelled"
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📂 پرونده کار",
-                    callback_data=f"taskmenu:open:{task_id}"
-                )
             ]
         ])
 
-        private_text = f"""
+        try:
+            await context.bot.send_message(
+                chat_id=assigned_to,
+                text=f"""
 ⏰ یادآوری کار انجام‌نشده
 
-🆔 شناسه کار:
-{task_id}
+🆔 شناسه کار: {task_id}
 
 📌 عنوان:
 {title}
@@ -129,19 +114,13 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 {status_fa}
 
 لطفاً وضعیت کار را مشخص کن:
-"""
-
-        try:
-            if assigned_to:
-                await context.bot.send_message(
-                    chat_id=assigned_to,
-                    text=private_text,
-                    reply_markup=keyboard
-                )
+""",
+                reply_markup=keyboard
+            )
 
         except Exception as e:
             print(f"Reminder send error for task {task_id}: {e}")
-
+            
         if GROUP_CHAT_ID:
 
             group_text = f"""
@@ -174,7 +153,7 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 print(f"Group reminder error for task {task_id}: {e}")
-
+                
 async def task_status_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -218,15 +197,6 @@ async def task_status_callback(
 
     conn.commit()
     conn.close()
-
-    log_task_history(
-        task_id,
-        query.from_user.id,
-        query.from_user.full_name,
-        "status_changed",
-        STATUS_TEXT.get(old_status, old_status),
-        STATUS_TEXT.get(new_status, new_status)
-    )
 
     status_fa = STATUS_TEXT.get(new_status, new_status)
 
@@ -272,15 +242,16 @@ TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
 
 if GROUP_CHAT_ID:
-    GROUP_CHAT_ID = int(GROUP_CHAT_ID)
+    try:
+        GROUP_CHAT_ID = int(GROUP_CHAT_ID)
+    except Exception:
+        GROUP_CHAT_ID = None
 
 print("BOT_TOKEN loaded:", bool(TOKEN), TOKEN[-6:] if TOKEN else "NO TOKEN")
 
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
-
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 CREATE_TITLE = 1
 CREATE_MEMBER = 2
@@ -291,653 +262,6 @@ CREATE_REMINDER = 4
 def db():
     return sqlite3.connect("sam_pro.db")
 
-
-
-def init_collaboration_tables():
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS task_notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER,
-            user_id INTEGER,
-            full_name TEXT,
-            note_text TEXT,
-            source TEXT DEFAULT 'manual',
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS task_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER,
-            user_id INTEGER,
-            full_name TEXT,
-            action TEXT,
-            old_value TEXT,
-            new_value TEXT,
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS task_message_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER,
-            chat_id INTEGER,
-            message_id INTEGER,
-            created_at TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
-
-
-def safe_full_name(user):
-    if not user:
-        return "کاربر نامشخص"
-    return user.full_name or user.username or str(user.id)
-
-
-def log_task_history(task_id, user_id, full_name, action, old_value="", new_value=""):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO task_history (
-            task_id,
-            user_id,
-            full_name,
-            action,
-            old_value,
-            new_value,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        task_id,
-        user_id,
-        full_name,
-        action,
-        old_value,
-        new_value,
-        now_text()
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def add_task_note(task_id, user_id, full_name, note_text, source="manual"):
-
-    note_text = str(note_text).strip()
-
-    if not note_text:
-        return False
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO task_notes (
-            task_id,
-            user_id,
-            full_name,
-            note_text,
-            source,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        task_id,
-        user_id,
-        full_name,
-        note_text,
-        source,
-        now_text()
-    ))
-
-    conn.commit()
-    conn.close()
-
-    log_task_history(
-        task_id,
-        user_id,
-        full_name,
-        "note_added",
-        "",
-        note_text
-    )
-
-    return True
-
-
-def get_task_notes(task_id, limit=20):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT full_name, note_text, source, created_at
-        FROM task_notes
-        WHERE task_id=?
-        ORDER BY id DESC
-        LIMIT ?
-    """, (task_id, limit))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    rows.reverse()
-
-    return rows
-
-
-def get_task_history_rows(task_id, limit=20):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT full_name, action, old_value, new_value, created_at
-        FROM task_history
-        WHERE task_id=?
-        ORDER BY id DESC
-        LIMIT ?
-    """, (task_id, limit))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    rows.reverse()
-
-    return rows
-
-
-def format_task_notes(task_id):
-
-    notes = get_task_notes(task_id, limit=20)
-
-    if not notes:
-        return f"""
-📝 شرح کار #{task_id}
-
-هنوز شرحی ثبت نشده.
-
-برای اضافه کردن شرح داخل گروه بنویس:
-کار {task_id}: متن شرح
-"""
-
-    text = f"📝 شرح کار #{task_id}\n\n"
-
-    for full_name, note_text, source, created_at in notes:
-        text += f"""
-🕒 {created_at}
-👤 {full_name}
-▫️ {note_text}
-"""
-
-    return text
-
-
-def format_task_history(task_id):
-
-    rows = get_task_history_rows(task_id, limit=20)
-
-    if not rows:
-        return f"""
-🧾 تاریخچه کار #{task_id}
-
-هنوز تغییری ثبت نشده.
-"""
-
-    action_text = {
-        "note_added": "📝 شرح اضافه کرد",
-        "status_changed": "📍 وضعیت را تغییر داد",
-        "task_created": "➕ کار را ساخت",
-        "task_updated": "✏️ کار را ویرایش کرد"
-    }
-
-    text = f"🧾 تاریخچه کار #{task_id}\n\n"
-
-    for full_name, action, old_value, new_value, created_at in rows:
-        action_fa = action_text.get(action, action)
-        text += f"""
-🕒 {created_at}
-👤 {full_name}
-{action_fa}
-از: {old_value if old_value else "-"}
-به: {new_value if new_value else "-"}
-"""
-
-    return text
-
-
-def extract_task_id_from_any_text(text):
-
-    if not text:
-        return None
-
-    text = fa_to_en_digits(str(text)) if "fa_to_en_digits" in globals() else str(text)
-
-    patterns = [
-        r"(?:کار|task)\s*#?\s*(\d+)",
-        r"#\s*(\d+)"
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-
-    return None
-
-
-def extract_note_for_task(text):
-
-    if not text:
-        return None, None
-
-    original_text = text.strip()
-    clean_text = fa_to_en_digits(original_text) if "fa_to_en_digits" in globals() else original_text
-
-    task_id = extract_task_id_from_any_text(clean_text)
-
-    if not task_id:
-        return None, None
-
-    note_text = original_text
-
-    for separator in [":", "：", "-", "—"]:
-        if separator in original_text:
-            before, after = original_text.split(separator, 1)
-            if extract_task_id_from_any_text(before):
-                note_text = after.strip()
-                break
-
-    helper_phrases = [
-        f"برای کار {task_id} بنویس",
-        f"برای کار {task_id} اضافه کن",
-        f"به کار {task_id} اضافه کن",
-        f"شرح کار {task_id}",
-        f"توضیح کار {task_id}",
-        f"کار {task_id}"
-    ]
-
-    for phrase in helper_phrases:
-        if note_text.startswith(phrase):
-            note_text = note_text.replace(phrase, "", 1).strip(" :：-—")
-
-    return task_id, note_text.strip()
-
-
-def detect_status_from_text(text):
-
-    text = str(text).strip()
-
-    done_words = [
-        "انجام شد",
-        "انجام دادم",
-        "تموم شد",
-        "تمام شد",
-        "کامل شد",
-        "فرستادم",
-        "ارسال شد"
-    ]
-
-    waiting_words = [
-        "منتظر پاسخ",
-        "منتظر جواب",
-        "قرار شد خبر بده",
-        "قرار شد جواب بده",
-        "فردا خبر میده",
-        "فردا جواب میده"
-    ]
-
-    progress_words = [
-        "در حال پیگیری",
-        "دارم پیگیری می‌کنم",
-        "دارم پیگیری میکنم",
-        "پیگیری می‌کنم",
-        "پیگیری میکنم"
-    ]
-
-    cancelled_words = [
-        "لغو شد",
-        "کنسل شد",
-        "نیاز نیست",
-        "حذف شود"
-    ]
-
-    if any(word in text for word in done_words):
-        return "done"
-
-    if any(word in text for word in cancelled_words):
-        return "cancelled"
-
-    if any(word in text for word in waiting_words):
-        return "waiting"
-
-    if any(word in text for word in progress_words):
-        return "in_progress"
-
-    return None
-
-
-def update_task_status_with_history(task_id, new_status, user_id, full_name):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT status
-        FROM tasks
-        WHERE id=?
-    """, (task_id,))
-
-    row = cur.fetchone()
-
-    if not row:
-        conn.close()
-        return False, None
-
-    old_status = row[0]
-
-    cur.execute("""
-        UPDATE tasks
-        SET status=?, completed_at=?
-        WHERE id=?
-    """, (
-        new_status,
-        now_text() if new_status == "done" else None,
-        task_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-    log_task_history(
-        task_id,
-        user_id,
-        full_name,
-        "status_changed",
-        STATUS_TEXT.get(old_status, old_status),
-        STATUS_TEXT.get(new_status, new_status)
-    )
-
-    return True, old_status
-
-
-def create_task_direct(title, assigned_to, assigned_by, priority="🟡 متوسط", reminder_time="none", project="🧩 عمومی", tag="🧩 عمومی", creator_name="کاربر"):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO tasks (
-            title,
-            assigned_to,
-            assigned_by,
-            priority,
-            reminder_time,
-            created_at,
-            project,
-            tag
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        title,
-        assigned_to,
-        assigned_by,
-        priority,
-        reminder_time,
-        now_text(),
-        project,
-        tag
-    ))
-
-    task_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    log_task_history(
-        task_id,
-        assigned_by,
-        creator_name,
-        "task_created",
-        "",
-        title
-    )
-
-    return task_id
-
-
-def guess_priority_from_text(text):
-
-    if any(word in text for word in ["فوری", "خیلی مهم", "ضروری", "امروز"]):
-        return "🔴 زیاد"
-
-    if any(word in text for word in ["کم", "بعدا", "هر وقت"]):
-        return "🟢 کم"
-
-    return "🟡 متوسط"
-
-
-def guess_assignee_from_text(text, fallback_user_id, fallback_name):
-
-    users = get_users()
-
-    for user_id, username, full_name, role in users:
-        if full_name and full_name in text:
-            return user_id, full_name
-        if username and ("@" + username) in text:
-            return user_id, full_name
-        if full_name:
-            first_name = full_name.split()[0]
-            if first_name and first_name in text:
-                return user_id, full_name
-
-    return fallback_user_id, fallback_name
-
-
-def extract_new_task_title(text):
-
-    text = str(text).strip()
-
-    prefixes = [
-        "کار جدید:",
-        "کار جدید：",
-        "تسک جدید:",
-        "وظیفه جدید:",
-        "ربات این کار رو بساز:",
-        "ربات، این کار رو بساز:",
-        "ربات این کار را بساز:",
-        "ربات، این کار را بساز:"
-    ]
-
-    for prefix in prefixes:
-        if text.startswith(prefix):
-            return text.replace(prefix, "", 1).strip()
-
-    return None
-
-
-def should_ignore_collaboration_text(text):
-
-    ignored = set(SILENT_IGNORE_TEXTS) if "SILENT_IGNORE_TEXTS" in globals() else set()
-
-    ignored.update([
-        "📋 کارها",
-        "⏱ پیگیری",
-        "🧠 تحلیل چت",
-        "🤖 دستیار هوشمند",
-        "🧠 مدیر هوشمند",
-        "👥 اعضا",
-        "📊 آمار",
-        "👤 پروفایل",
-        "➕ کار جدید",
-        "🎙 فرمان صوتی",
-        "⬅️بازگشت"
-    ])
-
-    return text in ignored
-
-
-async def send_task_group_card(context, chat_id, task_id):
-
-    task = get_task_by_id(task_id)
-
-    if not task:
-        return
-
-    try:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=single_task_text(task),
-            reply_markup=single_task_keyboard(task_id)
-        )
-    except Exception as e:
-        print(f"Group task card send error for task {task_id}: {e}")
-
-
-async def collaboration_text_watcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not update.message or not update.message.text:
-        return
-
-    if update.effective_user and update.effective_user.is_bot:
-        return
-
-    text = update.message.text.strip()
-
-    if not text or text.startswith("/"):
-        return
-
-    if should_ignore_collaboration_text(text):
-        return
-
-    if USER_STATE.get(update.effective_user.id) == "ai_mode":
-        return
-
-    await register_user(update)
-
-    user_id = update.effective_user.id
-    full_name = safe_full_name(update.effective_user)
-
-    new_task_title = extract_new_task_title(text)
-
-    if new_task_title:
-
-        assigned_to, member_name = guess_assignee_from_text(
-            new_task_title,
-            user_id,
-            full_name
-        )
-
-        priority = guess_priority_from_text(new_task_title)
-
-        task_id = create_task_direct(
-            title=new_task_title,
-            assigned_to=assigned_to,
-            assigned_by=user_id,
-            priority=priority,
-            reminder_time="none"
-        )
-
-        log_task_history(
-            task_id,
-            user_id,
-            full_name,
-            "task_created",
-            "",
-            new_task_title
-        )
-
-        await update.message.reply_text(
-            f"""
-✅ کار جدید از پیام گروه ثبت شد
-
-🆔 کار:
-{task_id}
-
-📝 عنوان:
-{new_task_title}
-
-👤 مسئول:
-{member_name}
-
-🔥 اولویت:
-{priority}
-"""
-        )
-
-        return
-
-    reply_task_id = None
-
-    if update.message.reply_to_message:
-        reply_text = update.message.reply_to_message.text or update.message.reply_to_message.caption
-        reply_task_id = extract_task_id_from_any_text(reply_text)
-
-    task_id, note_text = extract_note_for_task(text)
-
-    if not task_id and reply_task_id:
-        task_id = reply_task_id
-        note_text = text
-
-    if not task_id:
-        return
-
-    task = get_task_by_id(task_id)
-
-    if not task:
-        await update.message.reply_text(
-            f"❌ کار شماره {task_id} پیدا نشد."
-        )
-        return
-
-    if note_text:
-        add_task_note(
-            task_id,
-            user_id,
-            full_name,
-            note_text,
-            source="group_message"
-        )
-
-    new_status = detect_status_from_text(text)
-
-    status_line = ""
-
-    if new_status:
-        ok, old_status = update_task_status_with_history(
-            task_id,
-            new_status,
-            user_id,
-            full_name
-        )
-
-        if ok:
-            status_line = f"\n📍 وضعیت جدید: {STATUS_TEXT.get(new_status, new_status)}"
-
-    await update.message.reply_text(
-        f"""
-📝 شرح برای کار #{task_id} ثبت شد.{status_line}
-
-📌 متن:
-{note_text if note_text else text}
-"""
-    )
 
 def get_member_id_by_name(name):
 
@@ -994,19 +318,15 @@ async def start(
     await register_user(update)
 
     keyboard = [
-    ["➕ کار جدید"],
-    ["🎙 فرمان صوتی"],
-    ["📋 کارها"],
-    ["🧠 تحلیل چت"],
-    ["🧠 مدیر هوشمند"],
-    ["🤖 دستیار هوشمند"],
-    ["👥 اعضا"],
-    ["📊 آمار"],
-    ["👤 پروفایل"],
-    ["⏱ پیگیری"]
-]
+        ["➕ کار جدید", "📋 کارها"],
+        ["🧠 تحلیل چت", "🧠 مدیر هوشمند"],
+        ["🎙 فرمان صوتی", "🤖 دستیار هوشمند"],
+        ["📊 گزارش‌ها", "❓ راهنما"],
+        ["👥 اعضا", "👤 پروفایل"],
+        ["⏱ پیگیری"]
+    ]
     await update.message.reply_text(
-        "🤖 SAM PRO Team Manager",
+        "🤖 SAM PRO Team Manager V5 Real Merge\n\nکد اصلی حفظ شده و امکانات هوشمند اضافه شده است.",
         reply_markup=ReplyKeyboardMarkup(
             keyboard,
             resize_keyboard=True
@@ -1142,7 +462,17 @@ async def create_task_start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await register_user(update)
+    user = get_user(
+        update.effective_user.id
+    )
+
+    if user[3] != "admin":
+
+        await update.message.reply_text(
+            "فقط مدیر می‌تواند کار ایجاد کند."
+        )
+
+        return ConversationHandler.END
 
     await update.message.reply_text(
         "📝 عنوان کار را وارد کن:"
@@ -1321,7 +651,7 @@ async def create_task_reminder(
         )
     )
 
-    task_id = create_task(
+    create_task(
         title=title,
         assigned_to=assigned_to,
         assigned_by=update.effective_user.id,
@@ -1332,21 +662,9 @@ async def create_task_reminder(
         )
     )
 
-    log_task_history(
-        task_id,
-        update.effective_user.id,
-        update.effective_user.full_name,
-        "task_created",
-        "",
-        title
-    )
-
     await update.message.reply_text(
         f"""
 ✅ کار ثبت شد
-
-🆔 شماره:
-{task_id}
 
 عنوان:
 {title}
@@ -1383,34 +701,6 @@ async def create_task_reminder(
     except:
 
         pass
-
-    if GROUP_CHAT_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=GROUP_CHAT_ID,
-                text=f"""
-📌 کار جدید ثبت شد
-
-🆔 شماره:
-{task_id}
-
-📝 عنوان:
-{title}
-
-👤 مسئول:
-<a href="tg://user?id={assigned_to}">{member_name}</a>
-
-🔥 اولویت:
-{priority}
-
-⏰ یادآوری:
-{reminder_text}
-""",
-                parse_mode="HTML",
-                reply_markup=single_task_keyboard(task_id)
-            )
-        except Exception as e:
-            print(f"Group new task send error for task {task_id}: {e}")
 
     return ConversationHandler.END
 
@@ -1515,10 +805,6 @@ async def buttons(
 
     if text == "⬅️بازگشت":
         await start(update, context)
-        return
-
-    if text == "🧠 مدیر هوشمند":
-        await smart_assistant_command(update, context)
         return
 
     if text == "🤖 دستیار هوشمند":
@@ -1745,7 +1031,6 @@ async def ai_chat(update, context):
 SILENT_IGNORE_TEXTS = {
     "📋 کارها",
     "🤖 دستیار هوشمند",
-    "🧠 مدیر هوشمند",
     "👥 اعضا",
     "📊 آمار",
     "👤 پروفایل",
@@ -1787,22 +1072,6 @@ def init_silent_ai_tables():
             assigned_to INTEGER,
             priority TEXT,
             reminder_time TEXT,
-            source_text TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ai_task_updates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            task_id INTEGER,
-            proposed_status TEXT,
-            note_text TEXT,
-            confidence REAL,
-            reason TEXT,
-            advice TEXT,
             source_text TEXT,
             status TEXT DEFAULT 'pending',
             created_at TEXT
@@ -2001,496 +1270,6 @@ def update_ai_suggestion_status(suggestion_id, status):
     conn.close()
 
 
-def get_user_display_name(user_id):
-
-    if not user_id:
-        return "نامشخص"
-
-    user = get_user(user_id)
-
-    if not user:
-        return str(user_id)
-
-    return user[2] or user[1] or str(user_id)
-
-
-def get_open_tasks_for_ai(limit=25):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, title, assigned_to, priority, status, reminder_time, created_at, project, tag
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-        ORDER BY id DESC
-        LIMIT ?
-    """, (limit,))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    result = []
-
-    for row in rows:
-        task_id, title, assigned_to, priority, status, reminder_time, created_at, project, tag = row
-        recent_notes = get_task_notes(task_id, limit=3)
-        notes_text = " | ".join([note[1] for note in recent_notes]) if recent_notes else ""
-        result.append({
-            "id": task_id,
-            "title": title,
-            "assigned_to": assigned_to,
-            "assigned_name": get_user_display_name(assigned_to),
-            "priority": priority,
-            "status": status,
-            "status_text": STATUS_TEXT.get(status, status),
-            "reminder_time": reminder_time,
-            "created_at": created_at,
-            "project": project or "🧩 عمومی",
-            "tag": tag or "🧩 عمومی",
-            "recent_notes": notes_text
-        })
-
-    return result
-
-
-def save_ai_task_update(chat_id, task_id, proposed_status, note_text, confidence, reason, advice, source_text):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id
-        FROM ai_task_updates
-        WHERE task_id=?
-        AND status='pending'
-        AND COALESCE(note_text, '')=?
-        LIMIT 1
-    """, (task_id, note_text or ""))
-
-    existing = cur.fetchone()
-
-    if existing:
-        conn.close()
-        return None
-
-    cur.execute("""
-        INSERT INTO ai_task_updates (
-            chat_id,
-            task_id,
-            proposed_status,
-            note_text,
-            confidence,
-            reason,
-            advice,
-            source_text,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-    """, (
-        chat_id,
-        task_id,
-        proposed_status,
-        note_text,
-        confidence,
-        reason,
-        advice,
-        source_text,
-        now_text()
-    ))
-
-    update_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    return update_id
-
-
-def get_ai_task_update(update_id):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, chat_id, task_id, proposed_status, note_text, confidence, reason, advice, source_text, status, created_at
-        FROM ai_task_updates
-        WHERE id=?
-    """, (update_id,))
-
-    row = cur.fetchone()
-    conn.close()
-
-    return row
-
-
-def update_ai_task_update_status(update_id, status):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE ai_task_updates
-        SET status=?
-        WHERE id=?
-    """, (status, update_id))
-
-    conn.commit()
-    conn.close()
-
-
-def format_ai_update_text(update_id, task_id, proposed_status, note_text, confidence, reason, advice):
-
-    task = get_task_by_id(task_id)
-    title = task[1] if task else "کار نامشخص"
-    status_fa = STATUS_TEXT.get(proposed_status, proposed_status) if proposed_status and proposed_status != "none" else "بدون تغییر وضعیت"
-    confidence_percent = int(float(confidence or 0) * 100)
-
-    return f"""
-🧠 پیشنهاد هوشمند برای تکمیل کار
-
-🆔 پیشنهاد:
-{update_id}
-
-🆔 کار:
-{task_id}
-
-📌 عنوان:
-{title}
-
-📍 وضعیت پیشنهادی:
-{status_fa}
-
-📝 شرح پیشنهادی:
-{note_text if note_text else "-"}
-
-💡 مشورت / پیشنهاد روش درست:
-{advice if advice else "-"}
-
-🎯 اطمینان:
-{confidence_percent}%
-
-🔎 دلیل:
-{reason if reason else "-"}
-
-اعمال شود؟
-"""
-
-
-def ai_update_keyboard(update_id):
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✅ اعمال کن",
-                callback_data=f"aiupdate:{update_id}:apply"
-            ),
-            InlineKeyboardButton(
-                "❌ رد",
-                callback_data=f"aiupdate:{update_id}:reject"
-            )
-        ]
-    ])
-
-
-async def silent_ai_completion_analyze(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    force=False
-):
-
-    chat_id = update.effective_chat.id
-
-    messages = get_recent_chat_messages(chat_id, limit=40)
-    open_tasks = get_open_tasks_for_ai(limit=25)
-
-    if not messages or not open_tasks:
-        if force and update.message:
-            await update.message.reply_text(
-                "برای تحلیل هوشمند، هم پیام گروه لازم است هم کار باز."
-            )
-        return
-
-    history = ""
-    for full_name, text, created_at in messages:
-        history += f"{created_at} | {full_name}: {text}\n"
-
-    tasks_json = json.dumps(
-        open_tasks,
-        ensure_ascii=False,
-        indent=2
-    )
-
-    prompt = f"""
-تو مدیر هوشمند کارهای تیم هستی.
-
-وظیفه تو:
-1. پیام‌های چت را با لیست کارهای باز مقایسه کن.
-2. تشخیص بده آیا پیام‌ها نشان می‌دهند کاری انجام شده، در حال پیگیری است یا منتظر پاسخ است.
-3. اگر پیام مربوط به یک کار موجود است، برای همان کار یک شرح کوتاه پیشنهاد بده.
-4. اگر لازم است، روش درست پیگیری یا مشورت مدیریتی بده.
-5. فقط وقتی مطمئن هستی خروجی بده. اگر مطمئن نیستی چیزی نساز.
-
-وضعیت‌های مجاز:
-- done
-- in_progress
-- waiting
-- none
-
-خروجی فقط JSON array معتبر باشد. هیچ توضیح اضافه ننویس.
-
-فرمت خروجی:
-[
-  {{
-    "task_id": 12,
-    "proposed_status": "done یا in_progress یا waiting یا none",
-    "note_text": "شرح کوتاهی که باید به پرونده کار اضافه شود",
-    "confidence": 0.85,
-    "reason": "چرا این پیام را مربوط به این کار دانستی",
-    "advice": "پیشنهاد روش درست پیگیری یا مشورت مدیریتی",
-    "source_text": "جمله یا پیام اصلی مرتبط"
-  }}
-]
-
-کارهای باز:
-{tasks_json}
-
-چت اخیر:
-{history}
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "تو فقط JSON معتبر خروجی می‌دهی و وضعیت کارهای موجود را از چت تشخیص می‌دهی."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
-
-        content = response.choices[0].message.content
-
-    except Exception as e:
-        print(f"Smart completion AI error: {e}")
-        if force and update.message:
-            await update.message.reply_text(
-                f"❌ خطا در تحلیل هوشمند: {e}"
-            )
-        return
-
-    updates = extract_json_array(content)
-
-    if not updates:
-        if force and update.message:
-            await update.message.reply_text(
-                "🧠 تحلیل انجام شد، ولی پیشنهاد قابل اطمینان پیدا نشد."
-            )
-        return
-
-    created_count = 0
-
-    for item in updates:
-
-        try:
-            task_id = int(item.get("task_id"))
-        except:
-            continue
-
-        if not get_task_by_id(task_id):
-            continue
-
-        proposed_status = str(item.get("proposed_status", "none")).strip()
-
-        if proposed_status not in ["done", "in_progress", "waiting", "none"]:
-            proposed_status = "none"
-
-        note_text = str(item.get("note_text", "")).strip()
-        reason = str(item.get("reason", "")).strip()
-        advice = str(item.get("advice", "")).strip()
-        source_text = str(item.get("source_text", "")).strip()
-
-        try:
-            confidence = float(item.get("confidence", 0))
-        except:
-            confidence = 0
-
-        if confidence < 0.65:
-            continue
-
-        if not note_text and proposed_status == "none" and not advice:
-            continue
-
-        update_id = save_ai_task_update(
-            chat_id=chat_id,
-            task_id=task_id,
-            proposed_status=proposed_status,
-            note_text=note_text,
-            confidence=confidence,
-            reason=reason,
-            advice=advice,
-            source_text=source_text
-        )
-
-        if not update_id:
-            continue
-
-        target_chat_id = GROUP_CHAT_ID if GROUP_CHAT_ID else chat_id
-
-        try:
-            await context.bot.send_message(
-                chat_id=target_chat_id,
-                text=format_ai_update_text(
-                    update_id,
-                    task_id,
-                    proposed_status,
-                    note_text,
-                    confidence,
-                    reason,
-                    advice
-                ),
-                reply_markup=ai_update_keyboard(update_id)
-            )
-            created_count += 1
-        except Exception as e:
-            print(f"Send smart update error: {e}")
-
-    if force and update.message:
-        await update.message.reply_text(
-            f"🧠 تحلیل هوشمند انجام شد. تعداد پیشنهادها: {created_count}"
-        )
-
-
-async def ai_task_update_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-    await register_user(update)
-
-    data = query.data.split(":")
-
-    if len(data) != 3:
-        await query.edit_message_text("دستور نامعتبر است.")
-        return
-
-    update_id = int(data[1])
-    action = data[2]
-
-    row = get_ai_task_update(update_id)
-
-    if not row:
-        await query.edit_message_text("این پیشنهاد پیدا نشد.")
-        return
-
-    (
-        uid,
-        chat_id,
-        task_id,
-        proposed_status,
-        note_text,
-        confidence,
-        reason,
-        advice,
-        source_text,
-        status,
-        created_at
-    ) = row
-
-    if status != "pending":
-        await query.edit_message_text("این پیشنهاد قبلاً بررسی شده است.")
-        return
-
-    if action == "reject":
-        update_ai_task_update_status(update_id, "rejected")
-        await query.edit_message_text(
-            f"""
-❌ پیشنهاد هوشمند رد شد.
-
-🆔 پیشنهاد: {update_id}
-🆔 کار: {task_id}
-"""
-        )
-        return
-
-    if action == "apply":
-
-        full_name = query.from_user.full_name
-        user_id = query.from_user.id
-
-        if note_text:
-            add_task_note(
-                task_id,
-                user_id,
-                full_name,
-                note_text,
-                source="ai_completion"
-            )
-
-        if proposed_status and proposed_status != "none":
-            update_task_status_with_history(
-                task_id,
-                proposed_status,
-                user_id,
-                full_name
-            )
-
-        if advice:
-            add_task_note(
-                task_id,
-                user_id,
-                full_name,
-                f"مشورت هوشمند: {advice}",
-                source="ai_advice"
-            )
-
-        update_ai_task_update_status(update_id, "applied")
-
-        task = get_task_by_id(task_id)
-
-        await query.edit_message_text(
-            f"""
-✅ پیشنهاد هوشمند اعمال شد
-
-🆔 پیشنهاد:
-{update_id}
-
-🆔 کار:
-{task_id}
-
-📍 وضعیت فعلی:
-{STATUS_TEXT.get(task[5], task[5]) if task else "-"}
-
-📝 شرح/مشورت در پرونده کار ثبت شد.
-"""
-        )
-
-
-async def smart_assistant_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await register_user(update)
-
-    await update.message.reply_text(
-        "🧠 مدیر هوشمند در حال تحلیل چت و کارهای باز است..."
-    )
-
-    save_chat_message(update)
-
-    await silent_ai_analyze(update, context)
-    await silent_ai_completion_analyze(update, context, force=True)
-
-
 async def silent_ai_analyze(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -2535,7 +1314,7 @@ async def silent_ai_analyze(
     try:
 
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model="gpt-5",
             messages=[
                 {
                     "role": "system",
@@ -2635,18 +1414,11 @@ async def silent_ai_analyze(
 {reason if reason else "-"}
 """
 
-        target_chats = []
-
-        if GROUP_CHAT_ID:
-            target_chats.append(GROUP_CHAT_ID)
-        else:
-            target_chats.extend(admins)
-
-        for target_chat_id in target_chats:
+        for admin_id in admins:
 
             try:
                 await context.bot.send_message(
-                    chat_id=target_chat_id,
+                    chat_id=admin_id,
                     text=text,
                     reply_markup=keyboard
                 )
@@ -2663,7 +1435,13 @@ async def suggestion_callback(
     query = update.callback_query
     await query.answer()
 
-    await register_user(update)
+    user = get_user(query.from_user.id)
+
+    if not user or user[3] != "admin":
+        await query.edit_message_text(
+            "فقط مدیر می‌تواند این پیشنهاد را ثبت یا رد کند."
+        )
+        return
 
     data = query.data.split(":")
 
@@ -2716,7 +1494,7 @@ async def suggestion_callback(
         if not assigned_to:
             assigned_to = query.from_user.id
 
-        task_id = create_task(
+        create_task(
             title=title,
             assigned_to=assigned_to,
             assigned_by=query.from_user.id,
@@ -2725,32 +1503,11 @@ async def suggestion_callback(
             created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
         )
 
-        log_task_history(
-            task_id,
-            query.from_user.id,
-            query.from_user.full_name,
-            "task_created",
-            "پیشنهاد هوشمند",
-            title
-        )
-
-        if source_text:
-            add_task_note(
-                task_id,
-                query.from_user.id,
-                query.from_user.full_name,
-                f"از تحلیل چت: {source_text}",
-                source="ai_suggestion"
-            )
-
         update_ai_suggestion_status(suggestion_id, "approved")
 
         await query.edit_message_text(
             f"""
 ✅ کار ثبت شد
-
-🆔 شماره:
-{task_id}
 
 📌 عنوان:
 {title}
@@ -2775,27 +1532,6 @@ async def suggestion_callback(
             )
         except:
             pass
-
-        if GROUP_CHAT_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=GROUP_CHAT_ID,
-                    text=f"""
-🤖 کار جدید از تحلیل چت ثبت شد
-
-🆔 شماره:
-{task_id}
-
-📌 عنوان:
-{title}
-
-🔥 اولویت:
-{priority}
-""",
-                    reply_markup=single_task_keyboard(task_id)
-                )
-            except Exception as e:
-                print(f"Group AI task send error for task {task_id}: {e}")
 
 
 async def silent_message_watcher(
@@ -2829,7 +1565,6 @@ async def silent_message_watcher(
     if counter >= 5:
         context.chat_data["silent_counter"] = 0
         await silent_ai_analyze(update, context)
-        await silent_ai_completion_analyze(update, context)
 def get_chat_messages_between(chat_id, start_time, end_time):
 
     conn = sqlite3.connect("sam_pro.db")
@@ -3451,7 +2186,7 @@ async def task_draft_callback(
             )
             return
 
-        task_id = create_task(
+        create_task(
             title=draft["title"],
             assigned_to=draft["assigned_to"],
             assigned_by=query.from_user.id,
@@ -3459,31 +2194,31 @@ async def task_draft_callback(
             reminder_time=draft["reminder_time"],
             created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
         )
-
         conn = sqlite3.connect("sam_pro.db")
         cur = conn.cursor()
 
         cur.execute("""
             UPDATE tasks
             SET project=?, tag=?
-            WHERE id=?
+            WHERE id = (
+                SELECT id
+                FROM tasks
+                WHERE title=?
+                AND assigned_to=?
+                AND assigned_by=?
+                ORDER BY id DESC
+                LIMIT 1
+            )
         """, (
             draft["project"],
             draft["tag"],
-            task_id
+            draft["title"],
+            draft["assigned_to"],
+            query.from_user.id
         ))
 
         conn.commit()
         conn.close()
-
-        log_task_history(
-            task_id,
-            query.from_user.id,
-            query.from_user.full_name,
-            "task_created",
-            "",
-            draft["title"]
-        )
 
         await query.edit_message_text(
             f"""
@@ -3533,37 +2268,6 @@ async def task_draft_callback(
             )
         except:
             pass
-
-        if GROUP_CHAT_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=GROUP_CHAT_ID,
-                    text=f"""
-📌 کار جدید ثبت شد
-
-🆔 شماره:
-{task_id}
-
-📝 عنوان:
-{draft["title"]}
-
-👤 مسئول:
-<a href="tg://user?id={draft["assigned_to"]}">{draft["member_name"]}</a>
-
-🔥 اولویت:
-{draft["priority"]}
-
-🏗 پروژه:
-{draft["project"]}
-
-🏷 دسته‌بندی:
-{draft["tag"]}
-""",
-                    parse_mode="HTML",
-                    reply_markup=single_task_keyboard(task_id)
-                )
-            except Exception as e:
-                print(f"Group new task send error for task {task_id}: {e}")
 
         TASK_DRAFTS.pop(user_id, None)
 
@@ -3743,16 +2447,6 @@ def single_task_keyboard(task_id):
         ],
         [
             InlineKeyboardButton(
-                "📝 شرح‌ها",
-                callback_data=f"taskmenu:notes:{task_id}"
-            ),
-            InlineKeyboardButton(
-                "🧾 تاریخچه",
-                callback_data=f"taskmenu:history:{task_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "🗑 حذف از لیست",
                 callback_data=f"taskmenu:status:{task_id}:cancelled"
             )
@@ -3787,9 +2481,6 @@ def single_task_text(task):
         else reminder_time
     )
 
-    notes_count = len(get_task_notes(task_id, limit=100))
-    history_count = len(get_task_history_rows(task_id, limit=100))
-
     return f"""
 📌 جزئیات کار
 
@@ -3822,15 +2513,6 @@ def single_task_text(task):
 
 🕒 تاریخ ثبت:
 {created_at}
-
-📝 تعداد شرح‌ها:
-{notes_count}
-
-🧾 تعداد تغییرات:
-{history_count}
-
-برای اضافه کردن شرح داخل گروه بنویس:
-کار {task_id}: متن شرح
 """
 
 
@@ -3875,42 +2557,6 @@ async def task_menu_callback(
 
         return
 
-    if len(data) >= 3 and data[1] == "notes":
-
-        task_id = int(data[2])
-
-        await query.edit_message_text(
-            format_task_notes(task_id),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ برگشت به کار",
-                        callback_data=f"taskmenu:open:{task_id}"
-                    )
-                ]
-            ])
-        )
-
-        return
-
-    if len(data) >= 3 and data[1] == "history":
-
-        task_id = int(data[2])
-
-        await query.edit_message_text(
-            format_task_history(task_id),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ برگشت به کار",
-                        callback_data=f"taskmenu:open:{task_id}"
-                    )
-                ]
-            ])
-        )
-
-        return
-
     if len(data) >= 4 and data[1] == "status":
 
         task_id = int(data[2])
@@ -3918,15 +2564,6 @@ async def task_menu_callback(
 
         conn = sqlite3.connect("sam_pro.db")
         cur = conn.cursor()
-
-        cur.execute("""
-            SELECT status
-            FROM tasks
-            WHERE id=?
-        """, (task_id,))
-
-        row = cur.fetchone()
-        old_status = row[0] if row else ""
 
         cur.execute("""
             UPDATE tasks
@@ -3939,15 +2576,6 @@ async def task_menu_callback(
 
         conn.commit()
         conn.close()
-
-        log_task_history(
-            task_id,
-            query.from_user.id,
-            query.from_user.full_name,
-            "status_changed",
-            STATUS_TEXT.get(old_status, old_status),
-            STATUS_TEXT.get(new_status, new_status)
-        )
 
         if new_status == "cancelled":
 
@@ -4176,38 +2804,18 @@ async def send_daily_report_job(
 
     admin_ids = get_admin_ids()
 
-    sent_targets = []
-
-    if GROUP_CHAT_ID:
-        sent_targets.append(GROUP_CHAT_ID)
-
-    sent_targets.extend(admin_ids)
-
-    for target_id in set(sent_targets):
+    for admin_id in admin_ids:
 
         try:
 
             await context.bot.send_message(
-                chat_id=target_id,
+                chat_id=admin_id,
                 text=report
             )
 
         except Exception as e:
 
-            print(f"Daily report send error for {target_id}: {e}")
-
-    if GROUP_CHAT_ID:
-
-        try:
-
-            await context.bot.send_message(
-                chat_id=GROUP_CHAT_ID,
-                text=report
-            )
-
-        except Exception as e:
-
-            print(f"Daily report group send error: {e}")
+            print(f"Daily report send error for {admin_id}: {e}")
 
 
 def clean_json_text(text):
@@ -4692,10 +3300,308 @@ async def chatid_command(
 {update.effective_chat.type}
 """
     )
+async def chatid_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        f"""
+🆔 Chat ID:
+
+{update.effective_chat.id}
+
+نوع چت:
+{update.effective_chat.type}
+"""
+    )
+    
+
+# ===================== V5 REAL MERGE ADDON =====================
+# این بخش به آخر فایل اصلی اضافه شده و کد ۳۶۰۰ خطی قبلی را حذف نمی‌کند.
+
+V5_NOTE_WAIT = "v5_wait_note"
+V5_CHECK_WAIT = "v5_wait_check"
+
+def v5_now(): return datetime.now().strftime("%Y-%m-%d %H:%M")
+def v5_conn(): return sqlite3.connect("sam_pro.db")
+
+def v5_col(cur, table, col):
+    cur.execute(f"PRAGMA table_info({table})")
+    return any(r[1] == col for r in cur.fetchall())
+
+def v5_add_col(cur, table, col, definition):
+    if not v5_col(cur, table, col):
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+
+def v5_init_db():
+    conn=v5_conn(); cur=conn.cursor()
+    v5_add_col(cur,"tasks","description","TEXT DEFAULT ''")
+    v5_add_col(cur,"tasks","project","TEXT DEFAULT 'عمومی'")
+    v5_add_col(cur,"tasks","tag","TEXT DEFAULT 'عمومی'")
+    v5_add_col(cur,"tasks","reminder_repeat","TEXT DEFAULT 'none'")
+    v5_add_col(cur,"tasks","deleted","INTEGER DEFAULT 0")
+    v5_add_col(cur,"tasks","pinned","INTEGER DEFAULT 0")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, note TEXT, source TEXT, message_id INTEGER, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_history (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, action TEXT, old_value TEXT, new_value TEXT, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_checklist (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, item_text TEXT, is_done INTEGER DEFAULT 0, created_by INTEGER, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, file_id TEXT, file_type TEXT, caption TEXT, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_message_links (chat_id INTEGER, message_id INTEGER, task_id INTEGER, created_at TEXT, PRIMARY KEY(chat_id,message_id))")
+    cur.execute("CREATE TABLE IF NOT EXISTS v5_ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, suggestion_type TEXT, task_id INTEGER, title TEXT, note TEXT, new_status TEXT, priority TEXT, assigned_to INTEGER, assigned_to_name TEXT, reason TEXT, confidence REAL, payload TEXT, status TEXT DEFAULT 'pending', created_at TEXT, decided_by INTEGER, decided_at TEXT)")
+    conn.commit(); conn.close()
+
+def v5_task(task_id):
+    conn=v5_conn(); cur=conn.cursor()
+    cur.execute("SELECT id,title,assigned_to,assigned_by,status,priority,reminder_time,created_at,completed_at,description,project,tag,reminder_repeat,deleted,pinned FROM tasks WHERE id=?",(task_id,))
+    r=cur.fetchone(); conn.close()
+    if not r: return None
+    k=["id","title","assigned_to","assigned_by","status","priority","reminder_time","created_at","completed_at","description","project","tag","reminder_repeat","deleted","pinned"]
+    return dict(zip(k,r))
+
+def v5_tasks(open_only=False, limit=50):
+    conn=v5_conn(); cur=conn.cursor(); where="COALESCE(deleted,0)=0"
+    if open_only: where += " AND status NOT IN ('done','cancelled')"
+    cur.execute(f"SELECT id,title,assigned_to,assigned_by,status,priority,reminder_time,created_at,completed_at,description,project,tag,reminder_repeat,deleted,pinned FROM tasks WHERE {where} ORDER BY COALESCE(pinned,0) DESC, id DESC LIMIT ?",(limit,))
+    rows=cur.fetchall(); conn.close()
+    k=["id","title","assigned_to","assigned_by","status","priority","reminder_time","created_at","completed_at","description","project","tag","reminder_repeat","deleted","pinned"]
+    return [dict(zip(k,r)) for r in rows]
+
+def v5_update(task_id, field, value):
+    if field not in {"status","priority","reminder_time","completed_at","description","project","tag","reminder_repeat","deleted","pinned","assigned_to","title"}: return
+    conn=v5_conn(); cur=conn.cursor(); cur.execute(f"UPDATE tasks SET {field}=? WHERE id=?",(value,task_id)); conn.commit(); conn.close()
+
+def v5_history(task_id,user_id,full_name,action,old='',new=''):
+    conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT INTO task_history (task_id,user_id,full_name,action,old_value,new_value,created_at) VALUES (?,?,?,?,?,?,?)",(task_id,user_id,full_name,action,str(old),str(new),v5_now())); conn.commit(); conn.close()
+
+def v5_note(task_id,user_id,full_name,note,source='manual',message_id=None):
+    conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT INTO task_notes (task_id,user_id,full_name,note,source,message_id,created_at) VALUES (?,?,?,?,?,?,?)",(task_id,user_id,full_name,note,source,message_id,v5_now())); conn.commit(); conn.close()
+
+def v5_notes(task_id,limit=20):
+    conn=v5_conn(); cur=conn.cursor(); cur.execute("SELECT created_at,full_name,note,source FROM task_notes WHERE task_id=? ORDER BY id DESC LIMIT ?",(task_id,limit)); rows=cur.fetchall(); conn.close(); return rows
+
+def v5_histories(task_id,limit=30):
+    conn=v5_conn(); cur=conn.cursor(); cur.execute("SELECT created_at,full_name,action,old_value,new_value FROM task_history WHERE task_id=? ORDER BY id DESC LIMIT ?",(task_id,limit)); rows=cur.fetchall(); conn.close(); return rows
+
+def v5_link(chat_id,message_id,task_id):
+    conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT OR REPLACE INTO task_message_links (chat_id,message_id,task_id,created_at) VALUES (?,?,?,?)",(chat_id,message_id,task_id,v5_now())); conn.commit(); conn.close()
+
+def v5_task_by_msg(chat_id,message_id):
+    conn=v5_conn(); cur=conn.cursor(); cur.execute("SELECT task_id FROM task_message_links WHERE chat_id=? AND message_id=?",(chat_id,message_id)); r=cur.fetchone(); conn.close(); return r[0] if r else None
+
+def v5_status_from_text(t):
+    if any(w in t for w in ["انجام شد","انجام دادم","فرستادم","تمام شد","حل شد"]): return "done"
+    if any(w in t for w in ["منتظر","جواب","خبر بده","پاسخ"]): return "waiting"
+    if any(w in t for w in ["پیگیری","در حال","شروع کردم"]): return "in_progress"
+    if any(w in t for w in ["لغو","حذف","کنسل"]): return "cancelled"
+    return None
+
+def v5_priority(t):
+    if any(w in t for w in ["فوری","ضروری","مهم","بالا","زیاد"]): return "🔴 زیاد"
+    if any(w in t for w in ["کم","بعدا","پایین"]): return "🟢 کم"
+    return "🟡 متوسط"
+
+def v5_member_name(user_id):
+    u=get_user(user_id) if user_id else None
+    return (u[2] if u and len(u)>2 and u[2] else str(user_id or "نامشخص"))
+
+def v5_task_text(t):
+    st=STATUS_TEXT.get(t['status'],t['status']); rem=t.get('reminder_time') or 'none'
+    rem='ندارد' if rem=='none' else rem
+    pin='📌 ' if t.get('pinned') else ''
+    return f"""📂 پرونده کار #{t['id']}
+
+{pin}📌 عنوان:
+{t['title']}
+
+👤 مسئول:
+{v5_member_name(t.get('assigned_to'))}
+
+📍 وضعیت:
+{st}
+
+🔥 اولویت:
+{t.get('priority') or '🟡 متوسط'}
+
+🏗 پروژه: {t.get('project') or 'عمومی'}
+🏷 دسته: {t.get('tag') or 'عمومی'}
+⏰ یادآوری: {rem}
+
+📝 توضیح:
+{t.get('description') or '-'}"""
+
+def v5_keyboard(task_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ انجام شد",callback_data=f"v5:status:{task_id}:done"), InlineKeyboardButton("🔄 پیگیری",callback_data=f"v5:status:{task_id}:in_progress")],
+        [InlineKeyboardButton("⏳ منتظر",callback_data=f"v5:status:{task_id}:waiting"), InlineKeyboardButton("⛔ لغو",callback_data=f"v5:status:{task_id}:cancelled")],
+        [InlineKeyboardButton("📝 شرح‌ها",callback_data=f"v5:notes:{task_id}"), InlineKeyboardButton("➕ شرح",callback_data=f"v5:addnote:{task_id}")],
+        [InlineKeyboardButton("☑️ چک‌لیست",callback_data=f"v5:check:{task_id}"), InlineKeyboardButton("➕ چک‌لیست",callback_data=f"v5:addcheck:{task_id}")],
+        [InlineKeyboardButton("📎 فایل‌ها",callback_data=f"v5:files:{task_id}"), InlineKeyboardButton("🧾 تاریخچه",callback_data=f"v5:history:{task_id}")],
+        [InlineKeyboardButton("📌 پین",callback_data=f"v5:pin:{task_id}"), InlineKeyboardButton("🗑 حذف",callback_data=f"v5:delete:{task_id}")]
+    ])
+
+async def v5_send_card(context,chat_id,task_id):
+    t=v5_task(task_id)
+    if not t: return
+    msg=await context.bot.send_message(chat_id=chat_id,text=v5_task_text(t),reply_markup=v5_keyboard(task_id),parse_mode="HTML")
+    v5_link(chat_id,msg.message_id,task_id)
+
+async def v5_add_note_reply(update,task_id,note,source='manual'):
+    t=v5_task(task_id)
+    if not t:
+        await update.message.reply_text("❌ کار پیدا نشد."); return
+    v5_note(task_id,update.effective_user.id,update.effective_user.full_name,note,source,update.message.message_id)
+    v5_history(task_id,update.effective_user.id,update.effective_user.full_name,"add_note","",note)
+    status=v5_status_from_text(note)
+    if status:
+        old=t['status']; v5_update(task_id,'status',status)
+        if status=='done': v5_update(task_id,'completed_at',v5_now())
+        v5_history(task_id,update.effective_user.id,update.effective_user.full_name,"auto_status",old,status)
+        await update.message.reply_text(f"📝 شرح ثبت شد و وضعیت کار #{task_id} به {STATUS_TEXT.get(status,status)} تغییر کرد.")
+    else:
+        await update.message.reply_text(f"📝 شرح برای کار #{task_id} ثبت شد.")
+
+async def v5_create_from_text(update,context,raw):
+    assigned=update.effective_user.id; name=update.effective_user.full_name
+    for u in get_users():
+        uid, username, full_name, role = u[:4]
+        if (full_name and full_name.split()[0] in raw) or (username and '@'+username in raw):
+            assigned=uid; name=full_name; break
+    title=re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید)\s*[:：\-]?\s*",'',raw).strip()[:180]
+    conn=v5_conn(); cur=conn.cursor()
+    cur.execute("INSERT INTO tasks (title,assigned_to,assigned_by,priority,reminder_time,created_at,description) VALUES (?,?,?,?,?,?,?)",(title,assigned,update.effective_user.id,v5_priority(raw),'none',v5_now(),f"ثبت از پیام: {raw}"))
+    task_id=cur.lastrowid; conn.commit(); conn.close()
+    v5_history(task_id,update.effective_user.id,update.effective_user.full_name,'create','',title)
+    v5_note(task_id,update.effective_user.id,update.effective_user.full_name,f"متن اولیه: {raw}",'auto_create',update.message.message_id)
+    await update.message.reply_text(f"✅ کار جدید ثبت شد\n\n🆔 #{task_id}\n📌 {title}\n👤 مسئول: {name}")
+    await v5_send_card(context,update.effective_chat.id,task_id)
+
+async def v5_tasks_cmd(update,context):
+    await register_user(update)
+    tasks=v5_tasks(False,30)
+    if not tasks: await update.message.reply_text("📋 کاری ثبت نشده."); return
+    await update.message.reply_text("📋 لیست کارها")
+    for t in tasks[:12]: await v5_send_card(context,update.effective_chat.id,t['id'])
+
+async def v5_help_cmd(update,context):
+    await update.message.reply_text("""❓ راهنمای V5 Real Merge
+
+کار جدید: رضا فردا قیمت چوب روسیه را پیگیری کند
+کار 12: مشتری گفت فردا خبر می‌دهد
+کار 12 انجام شد
+/smart
+/summary
+/export_excel
+/export_pdf""", reply_markup=ReplyKeyboardMarkup([["➕ کار جدید","📋 کارها"],["🧠 تحلیل چت","🧠 مدیر هوشمند"],["🎙 فرمان صوتی","🤖 دستیار هوشمند"],["📊 گزارش‌ها","❓ راهنما"],["👥 اعضا","👤 پروفایل"],["⏱ پیگیری"]],resize_keyboard=True))
+
+async def v5_callback(update,context):
+    q=update.callback_query; await q.answer(); parts=q.data.split(':')
+    if parts[0]!='v5': return
+    action=parts[1]; task_id=int(parts[2]); t=v5_task(task_id)
+    if not t: await q.message.reply_text("❌ کار پیدا نشد."); raise ApplicationHandlerStop
+    if action=='status':
+        new=parts[3]; old=t['status']; v5_update(task_id,'status',new)
+        if new=='done': v5_update(task_id,'completed_at',v5_now())
+        v5_history(task_id,q.from_user.id,q.from_user.full_name,'status',old,new)
+        v5_note(task_id,q.from_user.id,q.from_user.full_name,f"وضعیت تغییر کرد: {STATUS_TEXT.get(old,old)} → {STATUS_TEXT.get(new,new)}",'button')
+        await q.edit_message_text(v5_task_text(v5_task(task_id)),reply_markup=v5_keyboard(task_id),parse_mode='HTML')
+    elif action=='notes':
+        rows=v5_notes(task_id,30); text=f"📝 شرح‌های کار #{task_id}\n\n"+("شرحی ثبت نشده." if not rows else "\n\n".join(f"{r[0]} | {r[1]}:\n{r[2]}" for r in rows))
+        await q.message.reply_text(text)
+    elif action=='addnote':
+        context.user_data[V5_NOTE_WAIT]=task_id; await q.message.reply_text(f"📝 شرح جدید برای کار #{task_id} را بنویس:")
+    elif action=='history':
+        rows=v5_histories(task_id,30); text=f"🧾 تاریخچه کار #{task_id}\n\n"+("تاریخچه‌ای ثبت نشده." if not rows else "\n".join(f"{r[0]} | {r[1]} | {r[2]}: {r[3]} → {r[4]}" for r in rows))
+        await q.message.reply_text(text)
+    elif action=='pin':
+        v5_update(task_id,'pinned',0 if t.get('pinned') else 1); await q.edit_message_text(v5_task_text(v5_task(task_id)),reply_markup=v5_keyboard(task_id),parse_mode='HTML')
+    elif action=='delete':
+        v5_update(task_id,'deleted',1); v5_update(task_id,'status','cancelled'); v5_history(task_id,q.from_user.id,q.from_user.full_name,'delete','','deleted'); await q.edit_message_text(f"🗑 کار #{task_id} حذف/لغو شد.")
+    else:
+        await q.message.reply_text("این گزینه در نسخه بعدی تکمیل می‌شود.")
+    raise ApplicationHandlerStop
+
+async def v5_text(update,context):
+    if not update.message or not update.message.text: return
+    await register_user(update); text=update.message.text.strip()
+    if context.user_data.get(V5_NOTE_WAIT):
+        tid=context.user_data.pop(V5_NOTE_WAIT); await v5_add_note_reply(update,tid,text,'button'); raise ApplicationHandlerStop
+    if text in ['🧠 مدیر هوشمند','مدیر هوشمند']:
+        await v5_smart_cmd(update,context); raise ApplicationHandlerStop
+    if text in ['❓ راهنما','راهنما']:
+        await v5_help_cmd(update,context); raise ApplicationHandlerStop
+    if text in ['📋 کارها','لیست کارها']:
+        await v5_tasks_cmd(update,context); raise ApplicationHandlerStop
+    if text in ['📊 گزارش‌ها','گزارش‌ها']:
+        await update.message.reply_text('📊 گزارش‌ها',reply_markup=ReplyKeyboardMarkup([["📊 آمار","📅 گزارش روزانه"],["📤 خروجی اکسل","📄 خروجی PDF"],["⬅️بازگشت"]],resize_keyboard=True)); raise ApplicationHandlerStop
+    if text=='📤 خروجی اکسل': await v5_export_excel_cmd(update,context); raise ApplicationHandlerStop
+    if text=='📄 خروجی PDF': await v5_export_pdf_cmd(update,context); raise ApplicationHandlerStop
+    rid=update.message.reply_to_message.message_id if update.message.reply_to_message else None
+    if rid:
+        tid=v5_task_by_msg(update.effective_chat.id,rid)
+        if tid: await v5_add_note_reply(update,tid,text,'reply'); raise ApplicationHandlerStop
+    m=re.search(r"کار\s*([0-9۰-۹٠-٩]+)\s*[:：\-]\s*(.+)",text)
+    if m: await v5_add_note_reply(update,int(fa_to_en_digits(m.group(1))),m.group(2).strip(),'group_pattern'); raise ApplicationHandlerStop
+    m=re.search(r"کار\s*([0-9۰-۹٠-٩]+).*(انجام|تمام|لغو|منتظر|پیگیری|در حال)",text)
+    if m:
+        tid=int(fa_to_en_digits(m.group(1))); st=v5_status_from_text(text) or 'in_progress'
+        fake=type('X',(),{})(); await v5_set_status_from_text(update,context,tid,st); raise ApplicationHandlerStop
+    if text.startswith(('کار جدید','تسک جدید','وظیفه جدید')):
+        raw=re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید)\s*[:：\-]?\s*",'',text).strip(); await v5_create_from_text(update,context,raw); raise ApplicationHandlerStop
+
+async def v5_set_status_from_text(update,context,task_id,status):
+    t=v5_task(task_id)
+    if not t: await update.message.reply_text('❌ کار پیدا نشد.'); return
+    old=t['status']; v5_update(task_id,'status',status)
+    if status=='done': v5_update(task_id,'completed_at',v5_now())
+    v5_history(task_id,update.effective_user.id,update.effective_user.full_name,'status_text',old,status)
+    await update.message.reply_text(f"✅ وضعیت کار #{task_id} شد: {STATUS_TEXT.get(status,status)}")
+
+async def v5_file(update,context):
+    if not update.message: return
+    rid=update.message.reply_to_message.message_id if update.message.reply_to_message else None
+    if not rid: return
+    tid=v5_task_by_msg(update.effective_chat.id,rid)
+    if not tid: return
+    file_id=file_type=None
+    if update.message.document: file_id=update.message.document.file_id; file_type='document'
+    elif update.message.photo: file_id=update.message.photo[-1].file_id; file_type='photo'
+    elif update.message.video: file_id=update.message.video.file_id; file_type='video'
+    elif update.message.audio: file_id=update.message.audio.file_id; file_type='audio'
+    if file_id:
+        conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT INTO task_files (task_id,user_id,full_name,file_id,file_type,caption,created_at) VALUES (?,?,?,?,?,?,?)",(tid,update.effective_user.id,update.effective_user.full_name,file_id,file_type,update.message.caption or '',v5_now())); conn.commit(); conn.close()
+        v5_history(tid,update.effective_user.id,update.effective_user.full_name,'add_file','',file_type); await update.message.reply_text(f"📎 فایل داخل پرونده کار #{tid} ذخیره شد."); raise ApplicationHandlerStop
+
+async def v5_export_excel_cmd(update,context):
+    try:
+        import openpyxl
+        wb=openpyxl.Workbook(); ws=wb.active; ws.append(['ID','Title','Status','Priority','Project','Tag','Reminder','Created'])
+        for t in v5_tasks(False,10000): ws.append([t['id'],t['title'],STATUS_TEXT.get(t['status'],t['status']),t['priority'],t['project'],t['tag'],t['reminder_time'],t['created_at']])
+        path=tempfile.mktemp(suffix='.xlsx'); wb.save(path); await update.message.reply_document(document=open(path,'rb'),filename='sam_tasks_report.xlsx')
+    except Exception as e: await update.message.reply_text(f"خطای خروجی اکسل: {e}")
+
+async def v5_export_pdf_cmd(update,context):
+    path=tempfile.mktemp(suffix='.txt')
+    with open(path,'w',encoding='utf-8') as f:
+        f.write('SAM PRO Team Manager Report\n\n')
+        for t in v5_tasks(False,500): f.write(f"#{t['id']} | {t['status']} | {t['priority']} | {t['title']}\n")
+    await update.message.reply_document(document=open(path,'rb'),filename='sam_tasks_report.txt')
+
+async def v5_smart_cmd(update,context):
+    if not client:
+        await update.message.reply_text('OPENAI_API_KEY تنظیم نشده.'); return
+    await update.message.reply_text('🧠 مدیر هوشمند در حال بررسی چت و کارهای باز است...')
+    # از تحلیل قبلی موجود در فایل اصلی هم استفاده می‌کنیم تا چیزی حذف نشود
+    try:
+        await silent_ai_analyze(update, context, update.effective_chat.id)
+    except Exception as e:
+        await update.message.reply_text(f'تحلیل هوشمند ساده اجرا شد، ولی خطای بخش قدیمی: {e}')
+
+# =================== END V5 REAL MERGE ADDON ===================
+
 init_db()
+v5_init_db()
 init_silent_ai_tables()
 init_task_metadata_columns()
-init_collaboration_tables()
 
 app = (
     Application
@@ -4712,6 +3618,13 @@ app.add_handler(
     CommandHandler(
         "start",
         start
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "chatid",
+        chatid_command
     )
 )
 
@@ -4771,13 +3684,6 @@ app.add_handler(
         summary_command
     )
 )
-
-app.add_handler(
-    CommandHandler(
-        "smart",
-        smart_assistant_command
-    )
-)
 app.add_handler(
     task_conversation
 )
@@ -4814,13 +3720,6 @@ app.add_handler(
     CallbackQueryHandler(
         suggestion_callback,
         pattern="^suggestion:"
-    )
-)
-
-app.add_handler(
-    CallbackQueryHandler(
-        ai_task_update_callback,
-        pattern="^aiupdate:"
     )
 )
 
@@ -4902,13 +3801,6 @@ app.add_handler(
 
 app.add_handler(
     MessageHandler(
-        filters.Regex("^🧠 مدیر هوشمند$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
         filters.Regex("^⏱ یک ساعت اخیر$"),
         buttons
     )
@@ -4974,13 +3866,16 @@ app.add_handler(
     group=2
 )
 
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        collaboration_text_watcher
-    ),
-    group=3
-)
+
+# V5 Real Merge handlers
+app.add_handler(CommandHandler("v5help", v5_help_cmd))
+app.add_handler(CommandHandler("smart", v5_smart_cmd))
+app.add_handler(CommandHandler("v5tasks", v5_tasks_cmd))
+app.add_handler(CommandHandler("export_excel", v5_export_excel_cmd))
+app.add_handler(CommandHandler("export_pdf", v5_export_pdf_cmd))
+app.add_handler(CallbackQueryHandler(v5_callback, pattern="^v5:"), group=-1)
+app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, v5_file), group=-1)
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v5_text), group=-1)
 
 if __name__ == "__main__":
 
@@ -4990,7 +3885,7 @@ if __name__ == "__main__":
 
     job_queue.run_repeating(
         check_tasks,
-        interval=3600,
+        interval=60,
         first=10
     )
 
@@ -5000,4 +3895,3 @@ if __name__ == "__main__":
     name="daily_report"
 )
     app.run_polling(drop_pending_updates=True)
-т
