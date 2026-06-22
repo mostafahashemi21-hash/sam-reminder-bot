@@ -1659,6 +1659,12 @@ app.add_handler(
 )
 
 app.add_handler(
+    CommandHandler(
+        "summary",
+        summary_command
+    )
+)
+app.add_handler(
     task_conversation
 )
 
