@@ -2414,6 +2414,8 @@ def single_task_text(task):
     status = task[5]
     reminder_time = task[6]
     created_at = task[7]
+    project = task[8] if len(task) > 8 and task[8] else "🧩 عمومی"
+    tag = task[9] if len(task) > 9 and task[9] else "🧩 عمومی"
 
     status_fa = STATUS_TEXT.get(status, status)
 
@@ -2440,6 +2442,12 @@ def single_task_text(task):
 
 🔥 اولویت:
 {priority}
+
+🏗 پروژه:
+{project}
+
+🏷 دسته‌بندی:
+{tag}
 
 📍 وضعیت:
 {status_fa}
