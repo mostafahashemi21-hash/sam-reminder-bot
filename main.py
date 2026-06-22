@@ -1495,8 +1495,6 @@ async def silent_message_watcher(
     conn.close()
 
     return rows
-
-
 def resolve_summary_range(text):
 
     now = datetime.now()
