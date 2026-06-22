@@ -107,6 +107,23 @@ def fa_to_en_digits(text: str) -> str:
     return text
 
 
+def replace_number_words(text: str) -> str:
+    text = normalize_text(text or "")
+    mapping = {
+        "صفر": "0", "یک": "1", "يه": "1", "یه": "1", "يک": "1",
+        "دو": "2", "سه": "3", "چهار": "4", "پنج": "5",
+        "شش": "6", "شیش": "6", "هفت": "7", "هشت": "8", "نه": "9",
+        "ده": "10", "یازده": "11", "دوازده": "12", "سیزده": "13",
+        "چهارده": "14", "پانزده": "15", "شانزده": "16", "هفده": "17",
+        "هجده": "18", "نوزده": "19", "بیست": "20",
+    }
+    # First handle common voice phrase: «کار شماره یک» -> «کار 1»
+    for word, num in sorted(mapping.items(), key=lambda x: len(x[0]), reverse=True):
+        text = re.sub(rf"(کار\s*(?:شماره)?\s*){word}(?=\b|\s|$)", rf"\1{num}", text)
+        text = re.sub(rf"(#)\s*{word}(?=\b|\s|$)", rf"\1{num}", text)
+    return text
+
+
 def clean_command_arg_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     if context.args:
         return " ".join(context.args).strip()
@@ -117,9 +134,9 @@ def clean_command_arg_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 def extract_task_id(text: str) -> Optional[int]:
-    text = fa_to_en_digits(normalize_text(text))
+    text = fa_to_en_digits(replace_number_words(normalize_text(text)))
     # Prefer explicit task indicators, so random numbers do not trigger task actions.
-    m = re.search(r"(?:کار|task|#)\s*(\d+)", text, flags=re.I)
+    m = re.search(r"(?:کار|task|#)\s*(?:شماره\s*)?(\d+)", text, flags=re.I)
     if m:
         return int(m.group(1))
     if re.fullmatch(r"\d+", text.strip()):
@@ -244,9 +261,9 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         [
             ["➕ کار جدید", "📋 کارها"],
             ["🧠 مدیر هوشمند", "🧠 تحلیل چت"],
-            ["🎙 فرمان صوتی", "📊 گزارش‌ها"],
-            ["👥 اعضا", "👤 پروفایل"],
-            ["❓ راهنما"],
+            ["🤖 چت جی پی تی", "🎙 فرمان صوتی"],
+            ["📊 گزارش‌ها", "👥 اعضا"],
+            ["👤 پروفایل", "❓ راهنما"],
         ],
         resize_keyboard=True,
     )
@@ -265,6 +282,25 @@ def project_keyboard(prefix: str = "new_project") -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main:back")])
     return InlineKeyboardMarkup(rows)
+
+
+def assignee_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("خودم", callback_data="new_assignee:self"), InlineKeyboardButton("بدون مسئول", callback_data="new_assignee:none")]]
+    users = get_users()[:20]
+    for u in users:
+        name = trim(u.get("full_name") or u.get("username") or str(u.get("user_id")), 28)
+        rows.append([InlineKeyboardButton(f"👤 {name}", callback_data=f"new_assignee:{u.get('user_id')}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="new:back:title")])
+    return InlineKeyboardMarkup(rows)
+
+
+def reminder_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("بدون یادآوری", callback_data="new_reminder:none")],
+        [InlineKeyboardButton("امروز ۱۸:۰۰", callback_data="new_reminder:today18"), InlineKeyboardButton("فردا ۱۰:۰۰", callback_data="new_reminder:tomorrow10")],
+        [InlineKeyboardButton("زمان دلخواه", callback_data="new_reminder:custom")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="new:back:project")],
+    ])
 
 
 def task_list_keyboard(tasks: List[Dict[str, Any]], page: int = 0, per_page: int = 12) -> InlineKeyboardMarkup:
@@ -405,27 +441,68 @@ async def open_task_menu(query, task_id: int) -> None:
         pass
 
 
-async def create_task_silent(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, project: Optional[str] = None) -> Optional[int]:
+async def create_task_silent(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    title: str,
+    project: Optional[str] = None,
+    assigned_to: Optional[int] = None,
+    reminder_time: str = "none",
+    reminder_repeat: str = "none",
+) -> Optional[int]:
     title = normalize_text(title)
     if not title:
         await update.message.reply_text("عنوان کار خالی است.")
         return None
     project = project or detect_project(title)
     priority = detect_priority(title)
-    assigned_to = user_id(update)
+    if assigned_to == -1:
+        assigned_to = None
+    elif assigned_to is None:
+        assigned_to = user_id(update)
     task_id = create_task(
         title=title,
         assigned_to=assigned_to,
         assigned_by=user_id(update),
         priority=priority,
-        reminder_time="none",
+        reminder_time=reminder_time or "none",
+        reminder_repeat=reminder_repeat or "none",
         created_at=now_str(),
         description="",
         project=project,
         tag="",
     )
     add_history(task_id, user_id(update), user_name(update), "create", "", title)
-    await update.message.reply_text("✅ ثبت شد")
+    await update.message.reply_text("✅ ثبت شد", reply_markup=main_keyboard())
+    return task_id
+
+
+async def finish_new_task_from_state(message, context: ContextTypes.DEFAULT_TYPE, creator_id: int, creator_name: str) -> Optional[int]:
+    title = normalize_text(context.user_data.get("new_title") or "")
+    project = context.user_data.get("new_project") or detect_project(title)
+    assigned_to = context.user_data.get("new_assigned_to")
+    reminder_time = context.user_data.get("new_reminder_time") or "none"
+    reminder_repeat = context.user_data.get("new_reminder_repeat") or "none"
+    if assigned_to == -1:
+        assigned_to = None
+    if not title:
+        await message.reply_text("عنوان کار خالی است.", reply_markup=main_keyboard())
+        return None
+    priority = detect_priority(title)
+    task_id = create_task(
+        title=title,
+        assigned_to=assigned_to,
+        assigned_by=creator_id,
+        priority=priority,
+        reminder_time=reminder_time,
+        reminder_repeat=reminder_repeat,
+        created_at=now_str(),
+        description="",
+        project=project,
+        tag="",
+    )
+    add_history(task_id, creator_id, creator_name, "create", "", title)
+    await message.reply_text("✅ ثبت شد", reply_markup=main_keyboard())
     return task_id
 
 
@@ -503,8 +580,9 @@ async def newtask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if raw:
         await create_task_silent(update, context, raw)
         return
-    context.user_data["new_project"] = None
-    await update.message.reply_text("📁 پروژه کار را انتخاب کن:", reply_markup=project_keyboard())
+    clear_user_states(context, user_id(update))
+    context.user_data["state"] = "waiting_new_title"
+    await update.message.reply_text("عنوان کار را بنویس:", reply_markup=back_keyboard())
 
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -703,15 +781,71 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "new:start":
+        clear_user_states(context, query.from_user.id)
+        context.user_data["state"] = "waiting_new_title"
+        await query.message.reply_text("عنوان کار را بنویس:", reply_markup=back_keyboard())
+        return
+
+    if data == "new:back:title":
+        context.user_data["state"] = "waiting_new_title"
+        await query.message.reply_text("عنوان کار را بنویس:", reply_markup=back_keyboard())
+        return
+
+    if data == "new:back:project":
+        context.user_data["state"] = "waiting_new_project"
         await query.message.reply_text("📁 پروژه کار را انتخاب کن:", reply_markup=project_keyboard())
         return
 
     if data.startswith("new_project:"):
         project = data.split(":", 1)[1]
         context.user_data["new_project"] = project
-        context.user_data["state"] = "waiting_new_title"
-        await query.message.reply_text(f"پروژه: {project}\nعنوان کار را بنویس:", reply_markup=back_keyboard())
+        context.user_data["state"] = "waiting_new_assignee"
+        await query.message.reply_text("👤 مسئول کار را انتخاب کن:", reply_markup=assignee_keyboard())
         return
+
+    if data.startswith("new_assignee:"):
+        value = data.split(":", 1)[1]
+        if value == "self":
+            context.user_data["new_assigned_to"] = query.from_user.id
+        elif value == "none":
+            context.user_data["new_assigned_to"] = -1
+        else:
+            try:
+                context.user_data["new_assigned_to"] = int(value)
+            except Exception:
+                context.user_data["new_assigned_to"] = query.from_user.id
+        context.user_data["state"] = "waiting_new_reminder"
+        await query.message.reply_text("⏰ یادآوری را انتخاب کن:", reply_markup=reminder_keyboard())
+        return
+
+    if data.startswith("new_reminder:"):
+        value = data.split(":", 1)[1]
+        if value == "none":
+            context.user_data["new_reminder_time"] = "none"
+            context.user_data["new_reminder_repeat"] = "none"
+            await finish_new_task_from_state(query.message, context, query.from_user.id, query.from_user.full_name)
+            clear_user_states(context, query.from_user.id)
+            return
+        if value == "today18":
+            dt = datetime.now().replace(hour=18, minute=0, second=0, microsecond=0)
+            if dt < datetime.now():
+                dt = dt + timedelta(days=1)
+            context.user_data["new_reminder_time"] = dt.strftime("%Y-%m-%d %H:%M")
+            context.user_data["new_reminder_repeat"] = "none"
+            await finish_new_task_from_state(query.message, context, query.from_user.id, query.from_user.full_name)
+            clear_user_states(context, query.from_user.id)
+            return
+        if value == "tomorrow10":
+            dt = (datetime.now() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+            context.user_data["new_reminder_time"] = dt.strftime("%Y-%m-%d %H:%M")
+            context.user_data["new_reminder_repeat"] = "none"
+            await finish_new_task_from_state(query.message, context, query.from_user.id, query.from_user.full_name)
+            clear_user_states(context, query.from_user.id)
+            return
+        if value == "custom":
+            context.user_data["state"] = "waiting_new_reminder_custom"
+            await query.message.reply_text("زمان یادآوری را بنویس. مثال:\n2026-06-25 18:00\nیا: فردا 10:00", reply_markup=back_keyboard())
+            return
 
     if data.startswith("tasks:page:"):
         page = int(data.split(":")[-1])
@@ -858,11 +992,73 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("✅ بازگشت", reply_markup=main_keyboard())
         return
 
+    # If the user is inside a wizard but taps a main menu button, leave the wizard first.
+    main_menu_aliases = [
+        "➕ کار جدید", "کار جدید", "ایجاد کار", "ساخت کار",
+        "📋 کارها", "کارها", "لیست کارها", "پیگیری", "⏱ پیگیری",
+        "🧠 مدیر هوشمند", "مدیر هوشمند", "🧠 تحلیل چت", "تحلیل چت", "خلاصه چت",
+        "🤖 چت جی پی تی", "چت جی پی تی", "chatgpt", "دستیار هوشمند",
+        "🎙 فرمان صوتی", "فرمان صوتی", "ویس",
+        "📊 گزارش‌ها", "گزارش‌ها", "👥 اعضا", "اعضا", "👤 پروفایل", "پروفایل", "❓ راهنما", "راهنما", "کمک",
+    ]
+    if context.user_data.get("state") and text in main_menu_aliases:
+        clear_user_states(context, user_id(update))
+
     state = context.user_data.get("state")
     if state == "waiting_new_title":
-        project = context.user_data.get("new_project") or detect_project(text)
+        context.user_data["new_title"] = text
+        context.user_data["state"] = "waiting_new_project"
+        await update.message.reply_text("📁 پروژه کار را انتخاب کن:", reply_markup=project_keyboard())
+        return
+
+    if state == "waiting_new_project":
+        if text in PROJECTS:
+            context.user_data["new_project"] = text
+            context.user_data["state"] = "waiting_new_assignee"
+            await update.message.reply_text("👤 مسئول کار را انتخاب کن:", reply_markup=assignee_keyboard())
+            return
+        await update.message.reply_text("لطفاً پروژه را از دکمه‌ها انتخاب کن.", reply_markup=project_keyboard())
+        return
+
+    if state == "waiting_new_assignee":
+        # Fallback for typed assignee names. Buttons are preferred.
+        selected = None
+        for u in get_users():
+            if text == (u.get("full_name") or "") or text == (u.get("username") or ""):
+                selected = int(u.get("user_id"))
+                break
+        if text in ["خودم", "من"]:
+            selected = user_id(update)
+        if text in ["بدون مسئول", "ندارد", "هیچ"]:
+            selected = -1
+        if selected is None:
+            await update.message.reply_text("لطفاً مسئول را از دکمه‌ها انتخاب کن.", reply_markup=assignee_keyboard())
+            return
+        context.user_data["new_assigned_to"] = selected
+        context.user_data["state"] = "waiting_new_reminder"
+        await update.message.reply_text("⏰ یادآوری را انتخاب کن:", reply_markup=reminder_keyboard())
+        return
+
+    if state == "waiting_new_reminder":
+        dt, repeat = parse_datetime_text(text)
+        if dt is None:
+            await update.message.reply_text("لطفاً یادآوری را از دکمه‌ها انتخاب کن یا زمان درست بنویس. مثال:\n2026-06-25 18:00\nیا: فردا 10:00", reply_markup=reminder_keyboard())
+            return
+        context.user_data["new_reminder_time"] = dt
+        context.user_data["new_reminder_repeat"] = repeat
+        await finish_new_task_from_state(update.message, context, user_id(update), user_name(update))
         clear_user_states(context, user_id(update))
-        await create_task_silent(update, context, text, project=project)
+        return
+
+    if state == "waiting_new_reminder_custom":
+        dt, repeat = parse_datetime_text(text)
+        if dt is None:
+            await update.message.reply_text("❌ فرمت زمان اشتباه است. مثال:\n2026-06-25 18:00\nیا: فردا 10:00")
+            return
+        context.user_data["new_reminder_time"] = dt
+        context.user_data["new_reminder_repeat"] = repeat
+        await finish_new_task_from_state(update.message, context, user_id(update), user_name(update))
+        clear_user_states(context, user_id(update))
         return
 
     if state == "waiting_note":
@@ -917,6 +1113,9 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text in ["🧠 تحلیل چت", "تحلیل چت", "خلاصه چت"]:
         await summary_command(update, context)
         return
+    if text in ["🤖 چت جی پی تی", "چت جی پی تی", "chatgpt", "دستیار هوشمند"]:
+        await ai_command(update, context)
+        return
     if text in ["🎙 فرمان صوتی", "فرمان صوتی", "ویس"]:
         await update.message.reply_text("🎙 ویس بفرست. من اول تبدیل به متن می‌کنم، بعد فقط اگر فرمان واضح باشد اجرا می‌کنم.")
         return
@@ -962,13 +1161,14 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Structured text patterns.
-    m = re.search(r"کار\s*([0-9۰-۹٠-٩]+)\s*[:：-]\s*(.+)", text)
+    tnum = replace_number_words(text)
+    m = re.search(r"کار\s*(?:شماره\s*)?([0-9۰-۹٠-٩]+)\s*[:：-]\s*(.+)", tnum)
     if m:
         task_id = int(fa_to_en_digits(m.group(1)))
         await add_note_and_reply(update, task_id, m.group(2), "pattern")
         return
 
-    m = re.search(r"کار\s*([0-9۰-۹٠-٩]+).*(انجام|تمام|لغو|کنسل|منتظر|پیگیری|در حال)", text)
+    m = re.search(r"کار\s*(?:شماره\s*)?([0-9۰-۹٠-٩]+).*(انجام|تمام|لغو|کنسل|منتظر|پیگیری|در حال)", tnum)
     if m:
         task_id = int(fa_to_en_digits(m.group(1)))
         status = detect_status_from_text(text) or "in_progress"
@@ -1030,7 +1230,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         path = tempfile.mktemp(suffix=".ogg")
         await file.download_to_drive(path)
         with open(path, "rb") as f:
-            tr = client.audio.transcriptions.create(model=TRANSCRIBE_MODEL, file=f)
+            tr = client.audio.transcriptions.create(model=TRANSCRIBE_MODEL, file=f, language="fa", prompt="فرمان‌های فارسی برای ربات مدیریت کار: کار شماره یک انجام شد، لیست کارها، کار جدید بساز، مدیر هوشمند")
         text = normalize_text(tr.text)
     except Exception as e:
         await update.message.reply_text(f"❌ خطای تبدیل ویس: {e}")
@@ -1041,31 +1241,37 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_voice_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     t = normalize_text(text)
-    if any(w in t for w in ["لیست کار", "کارها رو", "کارها را", "کارهای باز"]):
+    tnum = replace_number_words(t)
+    if any(w in t for w in ["لیست کار", "کارها رو", "کارها را", "کارهای باز", "لیست کارها"]):
         await tasks_command(update, context)
         return
     if any(w in t for w in ["مدیر هوشمند", "تحلیل هوشمند"]):
         await smart_command(update, context)
         return
+    if any(w in t for w in ["چت جی پی تی", "دستیار هوشمند", "ChatGPT", "chatgpt"]):
+        await ai_command(update, context)
+        return
     if any(w in t for w in ["گزارش", "آمار"]):
         await stats_command(update, context)
         return
-    m = re.search(r"کار\s*([0-9۰-۹٠-٩]+).*(انجام|تمام|لغو|منتظر|پیگیری|در حال)", t)
+    m = re.search(r"کار\s*(?:شماره\s*)?([0-9۰-۹٠-٩]+).*(انجام|تمام|لغو|منتظر|پیگیری|در حال)", tnum)
     if m:
         task_id = int(fa_to_en_digits(m.group(1)))
         status = detect_status_from_text(t) or "in_progress"
         await set_status_and_reply(update, task_id, status)
         return
-    m = re.search(r"کار\s*([0-9۰-۹٠-٩]+)\s*[:：-]?\s*(.+)", t)
-    if m and any(w in t for w in ["زنگ", "جواب", "گفت", "فرستادم", "پیگیری"]):
+    m = re.search(r"کار\s*(?:شماره\s*)?([0-9۰-۹٠-٩]+)\s*[:：-]?\s*(.+)", tnum)
+    if m and any(w in t for w in ["زنگ", "جواب", "گفت", "فرستادم", "پیگیری", "انجام"]):
         task_id = int(fa_to_en_digits(m.group(1)))
         await add_note_and_reply(update, task_id, m.group(2), "voice")
         return
-    if any(w in t for w in ["کار جدید", "تسک جدید", "وظیفه جدید"]):
-        raw = re.sub(r".*?(کار جدید|تسک جدید|وظیفه جدید)", "", t).strip(" :،-")
+    if any(w in t for w in ["کار جدید", "تسک جدید", "وظیفه جدید", "کار بساز", "ایجاد کار"]):
+        raw = re.sub(r".*?(کار جدید|تسک جدید|وظیفه جدید|کار بساز|ایجاد کار)", "", t).strip(" :،-")
         if raw:
             await create_task_silent(update, context, raw)
             return
+        await newtask_command(update, context)
+        return
     await update.message.reply_text("فرمان واضح نبود. چیزی اجرا نشد.")
 
 # ------------------------- AI -------------------------
@@ -1437,6 +1643,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("smart", smart_command))
     app.add_handler(CommandHandler("ai", ai_command))
     app.add_handler(CommandHandler("exit", exit_command))
+    app.add_handler(CommandHandler("Exit", exit_command))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("profile", whoami))
     app.add_handler(CommandHandler("members", members))
