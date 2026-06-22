@@ -1921,6 +1921,85 @@ async def task_draft_callback(
         )
 
         return
+           if data == "draft:project_menu":
+
+        keyboard = []
+
+        for i, project in enumerate(PROJECT_OPTIONS):
+            keyboard.append([
+                InlineKeyboardButton(
+                    project,
+                    callback_data=f"draft:project:{i}"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "⬅️ برگشت",
+                callback_data="draft:back"
+            )
+        ])
+
+        await query.edit_message_text(
+            "🏗 پروژه را انتخاب کن:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        return
+
+    if data.startswith("draft:project:"):
+
+        index = int(data.split(":")[2])
+
+        if 0 <= index < len(PROJECT_OPTIONS):
+            draft["project"] = PROJECT_OPTIONS[index]
+
+        await query.edit_message_text(
+            task_panel_text(draft),
+            reply_markup=task_panel_keyboard()
+        )
+
+        return
+
+    if data == "draft:tag_menu":
+
+        keyboard = []
+
+        for i, tag in enumerate(TAG_OPTIONS):
+            keyboard.append([
+                InlineKeyboardButton(
+                    tag,
+                    callback_data=f"draft:tag:{i}"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "⬅️ برگشت",
+                callback_data="draft:back"
+            )
+        ])
+
+        await query.edit_message_text(
+            "🏷 دسته‌بندی را انتخاب کن:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        return
+
+    if data.startswith("draft:tag:"):
+
+        index = int(data.split(":")[2])
+
+        if 0 <= index < len(TAG_OPTIONS):
+            draft["tag"] = TAG_OPTIONS[index]
+
+        await query.edit_message_text(
+            task_panel_text(draft),
+            reply_markup=task_panel_keyboard()
+        )
+
+        return 
 
     if data == "draft:reminder_menu":
 
