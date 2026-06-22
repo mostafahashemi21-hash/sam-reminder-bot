@@ -747,34 +747,10 @@ async def buttons(
     elif text == "👤 پروفایل":
         await whoami(update, context)
 
-    elif text == "➕ کار جدید":
+        elif text == "➕ کار جدید":
 
-        user = get_user(
-            update.effective_user.id
-        )
-
-        if not user:
-            await register_user(update)
-            user = get_user(update.effective_user.id)
-
-        if not user:
-            await update.message.reply_text(
-                "اول /start را بزن."
-            )
-            return
-
-        if user[3] != "admin":
-
-            await update.message.reply_text(
-                "فقط مدیر می‌تواند کار ایجاد کند."
-            )
-
-            return
-
-        await update.message.reply_text(
-            "برای شروع ایجاد کار از دستور زیر استفاده کن:\n\n/newtask"
-        )
-
+        await open_task_panel(update, context)
+        return
     elif text == "⏱ پیگیری":
         await list_tasks(update, context)
 task_conversation = ConversationHandler(
