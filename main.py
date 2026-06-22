@@ -60,6 +60,8 @@ GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "").strip()
 DELETE_USER_MENU_MESSAGES = os.getenv("DELETE_USER_MENU_MESSAGES", "true").lower() in {"1", "true", "yes", "on"}
 SMART_AUTO_APPLY = os.getenv("SMART_AUTO_APPLY", "false").lower() in {"1", "true", "yes", "on"}
 FOLLOWUP_INTERVAL_HOURS = int(os.getenv("FOLLOWUP_INTERVAL_HOURS", "3") or "3")
+AUTO_DELETE_BOT_STATUS = os.getenv("AUTO_DELETE_BOT_STATUS", "true").lower() in {"1", "true", "yes", "on"}
+STATUS_DELETE_SECONDS = int(os.getenv("STATUS_DELETE_SECONDS", "5") or "5")
 APP_TZ_NAME = os.getenv("APP_TZ", "Europe/Warsaw")
 try:
     APP_TZ = ZoneInfo(APP_TZ_NAME)
@@ -92,7 +94,7 @@ def clean_text(text: Optional[str]) -> str:
 def text_key(text: Optional[str]) -> str:
     """Normalize Persian button text. Telegram may send emojis before/after words and may use ZWNJ."""
     t = clean_text(text)
-    t = re.sub(r"[➕📋🧠🎙🤖📊👥👤❓🔙⬅️🗓📅📆📝✅❌⏰🔥📁✏️📍📌🗑☑️📎🔄⏳⛔🧾➖⭐️]", " ", t)
+    t = re.sub(r"[➕📋🧠🎙🤖📊👥👤❓🔙⬅️🗓📅📆📝✅❌⏰🔥📁✏️📍📌🗑☑️📎🔄⏳⛔🧾➖⭐️📴🔌]", " ", t)
     t = t.replace("/", " ").replace("‌", " ").replace("-", " ").replace("_", " ")
     t = re.sub(r"\s+", " ", t).strip().lower()
     return t
@@ -226,7 +228,8 @@ def is_main_menu_intent(text: str) -> Optional[str]:
     mapping = {
         "کار جدید": "new_task", "ایجاد کار": "new_task", "newtask": "new_task", "new": "new_task",
         "کارها": "tasks", "لیست کارها": "tasks", "tasks": "tasks",
-        "مدیر هوشمند": "smart", "ایجنت": "smart", "عامل هوشمند": "smart", "smart": "smart", "agent": "smart",
+        "مدیر هوشمند": "smart", "smart": "smart",
+        "ایجنت": "agent_chat", "ایجنت عملیاتی": "agent_chat", "عامل هوشمند": "agent_chat", "agent": "agent_chat",
         "تحلیل چت": "summary", "summary": "summary",
         "فرمان صوتی": "voice_help", "voice": "voice_help",
         "چت جی پی تی": "gpt_chat", "چت جیپی تی": "gpt_chat", "چت جی پیتی": "gpt_chat",
@@ -234,18 +237,19 @@ def is_main_menu_intent(text: str) -> Optional[str]:
         "گزارش ها": "reports", "گزارش": "reports", "reports": "reports",
         "اعضا": "members", "پروفایل": "profile", "راهنما": "help",
         "ملاقات ها": "meetings", "ملاقات": "meetings", "جلسات": "meetings", "جلسه": "meetings",
-        "بازگشت": "home", "برگشت": "home", "start": "home", "exit": "exit",
+        "بازگشت": "home", "برگشت": "home", "start": "home", "exit": "exit", "خروج": "exit",
+        "خروج از چت جی پی تی": "exit", "خروج از چتجیپیتی": "exit", "خروج از ایجنت": "exit", "خاموش": "exit",
     }
     if k in mapping:
         return mapping[k]
     compact_mapping = {
         "کارجدید": "new_task", "ایجادکار": "new_task",
         "لیستکارها": "tasks",
-        "مدیرهوشمند": "smart",
+        "مدیرهوشمند": "smart", "ایجنتعملیاتی": "agent_chat", "عامل هوشمند".replace(" ", ""): "agent_chat",
         "تحلیلچت": "summary",
         "فرمانصوتی": "voice_help",
         "چتجیپیتی": "gpt_chat", "چتجیپی تی".replace(" ", ""): "gpt_chat", "دستیارهوشمند": "gpt_chat",
-        "گزارشها": "reports", "گزارشات": "reports",
+        "گزارشها": "reports", "گزارشات": "reports", "خروجازچتجیپیتی": "exit", "خروجازچتجیپی تی".replace(" ", ""): "exit", "خروجازایجنت": "exit",
         "ملاقاتها": "meetings", "جلسات": "meetings",
     }
     if compact in compact_mapping:
@@ -254,7 +258,8 @@ def is_main_menu_intent(text: str) -> Optional[str]:
     # fuzzy fallback for common bottom-keyboard labels
     if "کار" in k and ("جدید" in k or "ایجاد" in k): return "new_task"
     if "کارها" in k or "لیست کار" in k: return "tasks"
-    if ("مدیر" in k and "هوشمند" in k) or "ایجنت" in k or "agent" in k: return "smart"
+    if "مدیر" in k and "هوشمند" in k: return "smart"
+    if "ایجنت" in k or "agent" in k or "عامل" in k: return "agent_chat"
     if "تحلیل" in k and "چت" in k: return "summary"
     if "فرمان" in k and "صوت" in k: return "voice_help"
     if ("چت" in k and ("جی" in k or "gpt" in k)) or "دستیار" in k: return "gpt_chat"
@@ -263,6 +268,7 @@ def is_main_menu_intent(text: str) -> Optional[str]:
     if "اعضا" in k: return "members"
     if "پروفایل" in k: return "profile"
     if "راهنما" in k or "help" in k: return "help"
+    if "خروج" in k or "خاموش" in k: return "exit"
     if "بازگشت" in k or "برگشت" in k: return "home"
     return None
 
@@ -273,14 +279,22 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("➕ کار جدید"), KeyboardButton("📋 کارها")],
         [KeyboardButton("🧠 مدیر هوشمند"), KeyboardButton("🧠 تحلیل چت")],
         [KeyboardButton("🗓 ملاقات‌ها"), KeyboardButton("🎙 فرمان صوتی")],
-        [KeyboardButton("🤖 چت جی‌پی‌تی"), KeyboardButton("📊 گزارش‌ها")],
-        [KeyboardButton("👥 اعضا"), KeyboardButton("❓ راهنما")],
+        [KeyboardButton("🤖 چت جی‌پی‌تی"), KeyboardButton("🤖 ایجنت عملیاتی")],
+        [KeyboardButton("📊 گزارش‌ها"), KeyboardButton("❓ راهنما")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False, input_field_placeholder="یک گزینه انتخاب کن…")
 
 
 def back_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True, one_time_keyboard=False)
+
+
+def gpt_exit_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[KeyboardButton("❌ خروج از چت جی‌پی‌تی")], [KeyboardButton("🔙 بازگشت")]], resize_keyboard=True, one_time_keyboard=False)
+
+
+def agent_exit_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[KeyboardButton("❌ خروج از ایجنت")], [KeyboardButton("🔙 بازگشت")]], resize_keyboard=True, one_time_keyboard=False)
 
 
 def task_draft_keyboard() -> InlineKeyboardMarkup:
@@ -511,6 +525,22 @@ async def safe_reply(update: Update, text: str, reply_markup: Any = None, parse_
     return None
 
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    try:
+        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
+    except Exception:
+        pass
+
+
+async def temp_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup: Any = None, parse_mode: Optional[str] = ParseMode.HTML, seconds: Optional[int] = None):
+    """Short bot status messages such as پردازش / ثبت شد are removed automatically."""
+    msg = await safe_reply(update, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    if msg and AUTO_DELETE_BOT_STATUS and context.job_queue:
+        context.job_queue.run_once(delete_message_job, when=seconds or STATUS_DELETE_SECONDS, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
+    return msg
+
+
 async def edit_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup: Any = None, parse_mode: Optional[str] = ParseMode.HTML):
     q = update.callback_query
     if q and q.message:
@@ -560,9 +590,13 @@ async def delete_user_message_if_possible(update: Update) -> None:
         pass
 
 async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = "منوی اصلی آماده است.") -> None:
+    # Home/back must turn off GPT/Agent modes too; otherwise every normal text is treated as a command.
+    context.user_data.pop("mode", None)
     context.user_data.pop("state", None)
     context.user_data.pop("draft_task", None)
     context.user_data.pop("draft_meeting", None)
+    context.user_data.pop("pending_actions", None)
+    context.user_data.pop("pending_comment", None)
     await safe_reply(update, f"🏠 {html(text)}", reply_markup=main_keyboard())
 
 
@@ -574,7 +608,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def exit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
-    await safe_reply(update, "✅ خارج شد", reply_markup=main_keyboard())
+    await temp_reply(update, context, "✅ خارج شد")
+    await safe_reply(update, "🏠 منوی اصلی", reply_markup=main_keyboard())
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -776,7 +811,7 @@ async def newtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         title = clean_text(" ".join(context.args))
         uid, name, _ = actor(update)
         task_id = db.create_task(title, project=guess_project(title), assigned_by=uid, assigned_by_name=name, chat_id=chat_id_of(update))
-        await safe_reply(update, "✅ ثبت شد")
+        await temp_reply(update, context, "✅ ثبت شد")
         task = db.get_task(task_id)
         if task:
             await safe_reply(update, task_text(task), task_card_keyboard(task_id))
@@ -808,7 +843,17 @@ async def gpt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await register_user(update)
     context.user_data.clear()
     context.user_data["mode"] = "gpt_chat"
-    await safe_reply(update, "🤖 چت جی‌پی‌تی فعال شد. سوالت را بنویس. برای خروج /exit", reply_markup=back_keyboard())
+    await safe_reply(update, "🤖 چت جی‌پی‌تی روشن شد. سوالت را بنویس. برای خاموش کردن دکمه خروج را بزن.", reply_markup=gpt_exit_keyboard())
+
+async def agent_mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    context.user_data.clear()
+    context.user_data["mode"] = "agent_chat"
+    await safe_reply(
+        update,
+        "🤖 ایجنت عملیاتی روشن شد. الان می‌توانی مستقیم دستور بدهی؛ مثلاً:\n«برای فردا ساعت ۱۰ ملاقات با موسی بگذار و یک کار پیگیری قیمت چوب برایش بساز.»\nبرای خاموش کردن دکمه خروج را بزن.",
+        reply_markup=agent_exit_keyboard(),
+    )
 
 
 async def reports_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -830,7 +875,7 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     uid, name, _ = actor(update)
     tid = int(context.args[0]) if context.args[0].isdigit() else None
     if tid and db.delete_task(tid, uid, name):
-        await safe_reply(update, "✅ حذف شد")
+        await temp_reply(update, context, "✅ حذف شد")
     else:
         await safe_reply(update, "❌ کار پیدا نشد")
 
@@ -842,7 +887,7 @@ async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     uid, name, _ = actor(update)
     tid = int(context.args[0]) if context.args[0].isdigit() else None
     if tid and db.restore_task(tid, uid, name):
-        await safe_reply(update, "✅ بازیابی شد")
+        await temp_reply(update, context, "✅ بازیابی شد")
     else:
         await safe_reply(update, "❌ کار پیدا نشد")
 
@@ -1260,6 +1305,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if mode == "gpt_chat":
         await run_gpt_chat(update, context, text)
         return
+    if mode == "agent_chat":
+        await run_agent_chat(update, context, text)
+        return
 
     if state:
         await handle_state_text(update, context, state, text)
@@ -1270,20 +1318,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ent = db.find_ui_entity(cid, msg.reply_to_message.message_id)
         if ent and ent["entity_type"] == "task":
             db.add_task_note(int(ent["entity_id"]), text, uid, name, source="reply")
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             return
         if ent and ent["entity_type"] == "meeting":
             db.add_meeting_minutes(int(ent["entity_id"]), text, user_id=uid, full_name=name, source="reply")
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             return
 
     # natural commands
     if await handle_natural_text(update, context, text):
         return
 
-    # Do not create random tasks. Keep silent in groups to reduce noise.
-    if update.effective_chat and update.effective_chat.type == "private":
-        await safe_reply(update, "فرمان واضح نبود. از منوی پایین استفاده کن.", reply_markup=main_keyboard())
+    # Do not create random tasks and do not spam unknown text.
+    # Unknown normal messages are kept as chat history for Smart Manager, but no warning is sent.
+    return
 
 
 async def handle_menu_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, intent: str) -> None:
@@ -1294,6 +1342,7 @@ async def handle_menu_intent(update: Update, context: ContextTypes.DEFAULT_TYPE,
     elif intent == "summary": await summary_cmd(update, context)
     elif intent == "voice_help": await safe_reply(update, "🎙 ویس بفرست. مثال: «کار شماره یک انجام شد» یا «برای کار سه بنویس...»", reply_markup=main_keyboard())
     elif intent == "gpt_chat": await gpt_cmd(update, context)
+    elif intent == "agent_chat": await agent_mode_cmd(update, context)
     elif intent == "reports": await reports_cmd(update, context)
     elif intent == "members": await members_cmd(update, context)
     elif intent == "profile": await whoami_cmd(update, context)
@@ -1308,10 +1357,10 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if is_back(text):
         context.user_data.pop("state", None)
         if context.user_data.get("draft_task"):
-            await safe_reply(update, "✅ برگشت", reply_markup=main_keyboard())
+            await temp_reply(update, context, "✅ برگشت")
             await refresh_task_draft(update, context)
         elif context.user_data.get("draft_meeting"):
-            await safe_reply(update, "✅ برگشت", reply_markup=main_keyboard())
+            await temp_reply(update, context, "✅ برگشت")
             await refresh_meeting_draft(update, context)
         else:
             await show_home(update, context, "برگشت")
@@ -1348,7 +1397,7 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await safe_reply(update, "❌ فرمت زمان اشتباه است. مثال: 2026-06-25 18:00")
             return
         db.set_task_reminder(tid, dt, actor_id=uid, actor_name=name)
-        await safe_reply(update, "✅ ذخیره شد")
+        await temp_reply(update, context, "✅ ذخیره شد")
         await show_task_card(update, context, tid)
         return
     if state == "await_task_note":
@@ -1356,7 +1405,7 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data.pop("state", None)
         if tid:
             db.add_task_note(tid, text, uid, name)
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             await show_task_card(update, context, tid)
         return
     if state == "await_check_item":
@@ -1364,7 +1413,7 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data.pop("state", None)
         if tid:
             db.add_checklist_item(tid, text, uid, name)
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             await show_checklist(update, context, tid)
         return
 
@@ -1405,7 +1454,7 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await safe_reply(update, "❌ فرمت زمان اشتباه است. مثال: فردا 10:00")
         else:
             context.user_data.setdefault("draft_meeting", {})["reminder_at"] = dt
-            await safe_reply(update, "✅ ذخیره شد")
+            await temp_reply(update, context, "✅ ذخیره شد")
         await refresh_meeting_draft(update, context)
         return
     if state == "await_existing_meeting_reminder":
@@ -1416,7 +1465,7 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await safe_reply(update, "❌ فرمت زمان اشتباه است. مثال: فردا 10:00")
             return
         db.set_meeting_reminder(mid, dt, uid, name)
-        await safe_reply(update, "✅ ذخیره شد")
+        await temp_reply(update, context, "✅ ذخیره شد")
         await show_meeting_card(update, context, mid)
         return
     if state == "await_meeting_minutes":
@@ -1424,12 +1473,12 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data.pop("state", None)
         if mid:
             db.add_meeting_minutes(mid, text, user_id=uid, full_name=name)
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             await show_meeting_card(update, context, mid)
         return
 
     context.user_data.pop("state", None)
-    await safe_reply(update, "✅ برگشت", reply_markup=main_keyboard())
+    await temp_reply(update, context, "✅ برگشت")
 
 
 async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -1441,7 +1490,7 @@ async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         tid = int(m.group(1)); note = m.group(2).strip()
         if db.get_task(tid):
             db.add_task_note(tid, note, uid, name, source="text")
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             return True
     # status
     tid = parse_task_id(text)
@@ -1452,7 +1501,7 @@ async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif any(w in text for w in ["پیگیری", "در حال"]): status = "در حال پیگیری"
         elif any(w in text for w in ["لغو", "کنسل"]): status = "لغو شد"
         if status and db.update_task_status(tid, status, uid, name):
-            await safe_reply(update, "✅ انجام شد" if status == "انجام شد" else "✅ ذخیره شد")
+            await temp_reply(update, context, "✅ انجام شد" if status == "انجام شد" else "✅ ذخیره شد")
             return True
     # meeting minutes: ملاقات 3: text
     m = re.match(r"(?:ملاقات|جلسه)\s*(?:شماره)?\s*#?\s*(\d+)\s*[:：\-]\s*(.+)$", text)
@@ -1460,7 +1509,7 @@ async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         mid = int(m.group(1)); minutes = m.group(2).strip()
         if db.get_meeting(mid):
             db.add_meeting_minutes(mid, minutes, user_id=uid, full_name=name, source="text")
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             return True
     # create task by free text only if explicit
     for prefix in ["کار جدید:", "تسک جدید:", "وظیفه جدید:", "کار جدید", "تسک جدید", "وظیفه جدید"]:
@@ -1468,7 +1517,7 @@ async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = clean_text(text.replace(prefix, "", 1))
             if title:
                 task_id = db.create_task(title, project=guess_project(title), assigned_by=uid, assigned_by_name=name, chat_id=cid)
-                await safe_reply(update, "✅ ثبت شد")
+                await temp_reply(update, context, "✅ ثبت شد")
                 t = db.get_task(task_id)
                 if t: await safe_reply(update, task_text(t), task_card_keyboard(task_id))
                 return True
@@ -1478,7 +1527,7 @@ async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = clean_text(text.replace(prefix, "", 1))
             if title:
                 mid = db.create_meeting(title, project=guess_project(title), created_by=uid, created_by_name=name, chat_id=cid)
-                await safe_reply(update, "✅ ثبت شد")
+                await temp_reply(update, context, "✅ ثبت شد")
                 m = db.get_meeting(mid)
                 if m: await safe_reply(update, meeting_text(m), meeting_card_keyboard(mid))
                 return True
@@ -1521,10 +1570,10 @@ async def on_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if target_type == "task" and db.get_task(int(target_id)):
         db.add_task_file(int(target_id), file_id, unique, ftype, caption, uid, name)
-        await safe_reply(update, "✅ فایل ثبت شد")
+        await temp_reply(update, context, "✅ فایل ثبت شد")
     elif target_type == "meeting" and db.get_meeting(int(target_id)):
         db.add_meeting_file(int(target_id), file_id, unique, ftype, caption, uid, name)
-        await safe_reply(update, "✅ فایل ثبت شد")
+        await temp_reply(update, context, "✅ فایل ثبت شد")
 
 
 # ----------------------- voice -----------------------
@@ -1534,7 +1583,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not msg or not msg.voice:
         return
     if not openai_client:
-        await safe_reply(update, "❌ OPENAI_API_KEY تنظیم نشده.")
+        await temp_reply(update, context, "❌ OPENAI_API_KEY تنظیم نشده.")
         return
     try:
         await msg.chat.send_action(ChatAction.TYPING)
@@ -1545,12 +1594,12 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 tr = openai_client.audio.transcriptions.create(model=OPENAI_TRANSCRIBE_MODEL, file=audio, language="fa")
         text = clean_text(getattr(tr, "text", "") or "")
         if not text:
-            await safe_reply(update, "❌ فرمان واضح نبود.")
+            await temp_reply(update, context, "❌ فرمان واضح نبود.")
             return
         await safe_reply(update, f"📝 متن ویس:\n{html(text)}")
         handled = await handle_voice_intent(update, context, text)
         if not handled:
-            await safe_reply(update, "❌ فرمان واضح نبود.")
+            await temp_reply(update, context, "❌ فرمان واضح نبود.")
     except Exception as e:
         logger.exception("voice failed")
         await safe_reply(update, f"❌ خطای ویس: {html(str(e)[:120])}")
@@ -1569,7 +1618,7 @@ async def handle_voice_intent(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = re.sub(r".*(?:ملاقات|جلسه)\s*جدید", "", text).strip(" :،") or "ملاقات جدید"
             uid, name, _ = actor(update)
             mid = db.create_meeting(title, project=guess_project(title), created_by=uid, created_by_name=name, chat_id=chat_id_of(update))
-            await safe_reply(update, "✅ ثبت شد")
+            await temp_reply(update, context, "✅ ثبت شد")
             m = db.get_meeting(mid)
             if m: await safe_reply(update, meeting_text(m), meeting_card_keyboard(mid))
             return True
@@ -1579,7 +1628,7 @@ async def handle_voice_intent(update: Update, context: ContextTypes.DEFAULT_TYPE
         title = re.sub(r".*(?:کار|تسک|وظیفه)\s*جدید", "", text).strip(" :،") or "کار جدید"
         uid, name, _ = actor(update)
         task_id = db.create_task(title, project=guess_project(title), assigned_by=uid, assigned_by_name=name, chat_id=chat_id_of(update))
-        await safe_reply(update, "✅ ثبت شد")
+        await temp_reply(update, context, "✅ ثبت شد")
         return True
     return False
 
@@ -1611,11 +1660,51 @@ async def ask_openai(prompt: str, system: str = "", temperature: float = 0.2) ->
 
 async def run_gpt_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if not openai_client:
-        await safe_reply(update, "❌ OPENAI_API_KEY تنظیم نشده.")
+        await temp_reply(update, context, "❌ OPENAI_API_KEY تنظیم نشده.")
         return
-    await safe_reply(update, "⏳ در حال پردازش…")
+    await temp_reply(update, context, "⏳ در حال پردازش…", seconds=3)
     answer = await ask_openai(text, system="تو دستیار فارسی هستی. در این حالت فقط جواب متنی بده و هیچ کاری در دیتابیس انجام نده.")
-    await safe_reply(update, html(answer), parse_mode=ParseMode.HTML)
+    await safe_reply(update, html(answer), reply_markup=gpt_exit_keyboard(), parse_mode=ParseMode.HTML)
+
+
+async def run_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    if not openai_client:
+        await temp_reply(update, context, "❌ OPENAI_API_KEY تنظیم نشده.")
+        return
+    cid = chat_id_of(update)
+    uid, name, _ = actor(update)
+    tasks = db.list_tasks(include_done=False, include_deleted=False, limit=50)
+    meetings = db.list_meetings(upcoming_only=True, limit=30)
+    messages = db.get_recent_messages(cid, limit=30) if cid else []
+    prompt = (
+        "دستور مستقیم کاربر را به اکشن‌های عملیاتی تبدیل کن. اگر لازم است کار یا ملاقات بساز، شرح اضافه کن، وضعیت تغییر بده یا یادآوری تنظیم کن. "
+        "فقط JSON معتبر بده. اگر دستور فقط سؤال/مشورت است و اکشنی ندارد، comment بده.\n\n"
+        f"دستور کاربر: {text}\n\n"
+        f"کارهای باز: {json.dumps(tasks, ensure_ascii=False, default=str)}\n\n"
+        f"ملاقات‌های آینده: {json.dumps(meetings, ensure_ascii=False, default=str)}\n\n"
+        f"پیام‌های اخیر: {json.dumps(messages[-20:], ensure_ascii=False, default=str)}"
+    )
+    await temp_reply(update, context, "⏳ ایجنت در حال بررسی…", seconds=3)
+    raw = await ask_openai(prompt, system=AGENT_SYSTEM, temperature=0.1)
+    actions, comment = parse_agent_json(raw)
+    if not actions and comment:
+        await safe_reply(update, html(comment), reply_markup=agent_exit_keyboard(), parse_mode=ParseMode.HTML)
+        return
+    if not actions:
+        await temp_reply(update, context, "اطلاعات کافی برای انجام کار پیدا نکردم.")
+        return
+    if SMART_AUTO_APPLY:
+        summary = await execute_actions(update, context, actions, actor_type="AI")
+        await safe_reply(update, summary or "✅ اعمال شد", reply_markup=agent_exit_keyboard())
+    else:
+        context.user_data["pending_actions"] = actions
+        context.user_data["pending_comment"] = comment
+        lines = ["🤖 ایجنت می‌خواهد این کارها را انجام دهد:"]
+        for i, a in enumerate(actions, 1):
+            lines.append(f"{i}. {html(action_label(a))}")
+        if comment:
+            lines.append(f"\n🧠 {html(comment)}")
+        await safe_reply(update, "\n".join(lines), reply_markup=confirm_actions_keyboard())
 
 
 async def run_summary_range(update: Update, context: ContextTypes.DEFAULT_TYPE, range_key: str) -> None:
@@ -1636,7 +1725,7 @@ async def run_summary_range(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     prompt = "پیام‌های زیر را خلاصه و تحلیل کن. خروجی فارسی بده با بخش‌های: خلاصه گفتگو، تصمیم‌ها، کارهای قابل پیگیری، موارد مبهم، ریسک‌ها، اشتباهات برنامه‌ریزی، پیشنهاد مدیریتی.\n\n"
     prompt += "\n".join([f"{m.get('full_name')}: {m.get('text')}" for m in messages[-80:]])
-    await edit_or_send(update, context, "⏳ در حال تحلیل…")
+    await temp_reply(update, context, "⏳ در حال تحلیل…", seconds=3)
     answer = await ask_openai(prompt, system="تو مدیر عملیات فارسی هستی. کوتاه، دقیق و عملیاتی تحلیل کن.")
     await safe_reply(update, html(answer), parse_mode=ParseMode.HTML)
 
@@ -1647,23 +1736,23 @@ async def run_smart_manager(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await safe_reply(update, "❌ چت پیدا نشد.")
         return
     if not openai_client:
-        await safe_reply(update, "❌ OPENAI_API_KEY تنظیم نشده.")
+        await temp_reply(update, context, "❌ OPENAI_API_KEY تنظیم نشده.")
         return
     messages = db.get_recent_messages(cid, limit=80)
     tasks = db.list_tasks(include_done=False, include_deleted=False, limit=50)
     meetings = db.list_meetings(upcoming_only=True, limit=30)
     prompt = build_agent_prompt(messages, tasks, meetings)
-    await safe_reply(update, "⏳ مدیر هوشمند در حال بررسی…")
+    await temp_reply(update, context, "⏳ مدیر هوشمند در حال بررسی…", seconds=3)
     raw = await ask_openai(prompt, system=AGENT_SYSTEM, temperature=0.1)
     actions, comment = parse_agent_json(raw)
     if not actions and not comment:
-        await safe_reply(update, "اطلاعات کافی برای اعمال خودکار وجود ندارد.")
+        await temp_reply(update, context, "اطلاعات کافی برای اعمال خودکار وجود ندارد.")
         return
     if actions and SMART_AUTO_APPLY:
         summary = await execute_actions(update, context, actions, actor_type="AI")
         if comment:
             await safe_reply(update, "🧠 کامنت مدیریتی دارم. اجازه می‌دهی نشان بدهم؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("نمایش کامنت", callback_data="agent:comment:show")]]))
-        await safe_reply(update, summary or "✅ اعمال شد")
+        await temp_reply(update, context, summary or "✅ اعمال شد")
     else:
         context.user_data["pending_actions"] = actions
         context.user_data["pending_comment"] = comment
@@ -1956,7 +2045,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("meeting", meetings_cmd))
     app.add_handler(CommandHandler("summary", summary_cmd))
     app.add_handler(CommandHandler("smart", smart_cmd))
-    app.add_handler(CommandHandler("agent", smart_cmd))
+    app.add_handler(CommandHandler("agent", agent_mode_cmd))
     app.add_handler(CommandHandler("gpt", gpt_cmd))
     app.add_handler(CommandHandler("reports", reports_cmd))
     app.add_handler(CommandHandler("report", reports_cmd))
