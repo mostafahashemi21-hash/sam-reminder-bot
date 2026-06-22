@@ -1538,7 +1538,8 @@ def resolve_summary_range(text):
 
 async def summary_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
+    forced=None
 ):
 
     chat_id = update.effective_chat.id
