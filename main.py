@@ -2859,7 +2859,7 @@ async def voice_task_handler(
 
     await file.download_to_drive(file_path)
 
-        try:
+    try:
 
         with open(file_path, "rb") as audio_file:
 
@@ -2879,8 +2879,7 @@ async def voice_task_handler(
         if handled:
             context.user_data.pop("waiting_voice_task", None)
             return
-
-    except Exception as e:
+        except Exception as e:
 
         await update.message.reply_text(
             f"❌ خطا در تبدیل ویس به متن:\n{e}"
