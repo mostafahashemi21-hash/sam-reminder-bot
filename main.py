@@ -718,9 +718,10 @@ async def buttons(
 
     text = update.message.text
 
-        if text == "📋 کارها":
+        elif text == "⏱ پیگیری":
 
-        await list_tasks(update, context)
+    await open_tasks_panel(update, context)
+    return
 
     elif text == "🧠 تحلیل چت":
 
