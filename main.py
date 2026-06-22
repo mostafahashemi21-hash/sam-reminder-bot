@@ -2859,7 +2859,7 @@ async def voice_task_handler(
 
     await file.download_to_drive(file_path)
 
-        try:
+   try:
 
         with open(file_path, "rb") as audio_file:
 
