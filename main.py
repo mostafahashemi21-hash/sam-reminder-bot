@@ -718,6 +718,7 @@ async def buttons(
     text = update.message.text
 
     if text == "📋 کارها":
+
         await list_tasks(update, context)
 
     elif text == "🤖 دستیار هوشمند":
@@ -739,19 +740,24 @@ async def buttons(
         return
 
     elif text == "👥 اعضا":
+
         await members(update, context)
 
     elif text == "📊 آمار":
+
         await stats(update, context)
 
     elif text == "👤 پروفایل":
+
         await whoami(update, context)
 
-        elif text == "➕ کار جدید":
+    elif text == "➕ کار جدید":
 
         await open_task_panel(update, context)
         return
+
     elif text == "⏱ پیگیری":
+
         await list_tasks(update, context)
 task_conversation = ConversationHandler(
 
