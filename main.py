@@ -2524,6 +2524,13 @@ app.add_handler(
         pattern="^draft:"
     )
 )
+
+app.add_handler(
+    CallbackQueryHandler(
+        task_menu_callback,
+        pattern="^taskmenu:"
+    )
+)
 app.add_handler(
     MessageHandler(
         filters.Regex("^📋 کارها$"),
