@@ -1,24 +1,26 @@
-from openai import OpenAI
+import html
+import json
 import os
+import re
+import tempfile
+from datetime import datetime, timedelta, time
+from typing import Any, Dict, List, Optional, Tuple
+
+from openai import OpenAI
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
-    KeyboardButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputFile
+    InputFile,
 )
-
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    ConversationHandler,
-    ContextTypes,
     CallbackQueryHandler,
-    ApplicationHandlerStop,
+    ContextTypes,
     filters,
-    JobQueue
 )
 
 from database import (
@@ -27,4915 +29,1440 @@ from database import (
     get_user,
     get_users,
     count_admins,
+    get_admin_ids,
     create_task,
+    get_task,
     get_tasks,
-    complete_task
+    get_open_tasks,
+    complete_task,
+    update_task_field,
+    add_task_note,
+    get_task_notes,
+    add_history,
+    get_task_history,
+    add_checklist_item,
+    get_checklist,
+    toggle_checklist_item,
+    add_task_file,
+    get_task_files,
+    link_task_message,
+    get_task_id_by_message,
+    save_chat_message,
+    get_recent_chat_messages,
+    get_chat_messages_between,
+    save_ai_suggestion,
+    get_ai_suggestion,
+    update_ai_suggestion_status,
+    now_str,
 )
 
-from datetime import datetime, timedelta
-
-import sqlite3
-import os
-import json
-import tempfile
-
-
-STATUS_TEXT = {
-    "pending": "⏳ باز",
-    "in_progress": "🔄 در حال پیگیری",
-    "waiting": "⏳ منتظر پاسخ",
-    "done": "✅ انجام شد",
-    "cancelled": "⛔ لغو شد"
-}
-
-
-async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
-
-    """ارسال پیگیری سه‌ساعته به گروه.
-
-    قبلاً این تابع هر ۶۰ ثانیه برای تک‌تک کارهای باز پیام می‌فرستاد
-    و باعث اسپم می‌شد. الان فقط یک لیست کلی از کارهای باز می‌فرستد؛
-    روی هر کار که زده شود، منوی همان کار باز می‌شود.
-    """
-
-    if not GROUP_CHAT_ID:
-        print("GROUP_CHAT_ID is not set; 3-hour task follow-up skipped.")
-        return
-
-    try:
-        tasks = get_open_tasks_for_panel()
-    except Exception as e:
-        print(f"3-hour task follow-up error: {e}")
-        return
-
-    if not tasks:
-        try:
-            await context.bot.send_message(
-                chat_id=GROUP_CHAT_ID,
-                text="✅ پیگیری سه‌ساعته\n\nفعلاً کار بازی در لیست وجود ندارد."
-            )
-        except Exception as e:
-            print(f"3-hour empty follow-up send error: {e}")
-        return
-
-    text = f"""
-⏱ پیگیری سه‌ساعته کارها
-
-📋 تعداد کارهای باز: {len(tasks)}
-
-روی هر کار بزن تا منوی همان کار باز شود و بتوانی وضعیت را تغییر بدهی.
-""".strip()
-
-    try:
-        await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=text,
-            reply_markup=task_list_keyboard()
-        )
-    except Exception as e:
-        print(f"3-hour task list send error: {e}")
-
-
-async def task_status_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data.split(":")
-
-    if len(data) != 3:
-        await query.edit_message_text("❌ دستور نامعتبر است.")
-        return
-
-    task_id = int(data[1])
-    new_status = data[2]
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT title, assigned_to, assigned_by, status
-        FROM tasks
-        WHERE id=?
-    """, (task_id,))
-
-    task = cur.fetchone()
-
-    if not task:
-        conn.close()
-        await query.edit_message_text("❌ این کار پیدا نشد.")
-        return
-
-    title, assigned_to, assigned_by, old_status = task
-
-    cur.execute("""
-        UPDATE tasks
-        SET status=?
-        WHERE id=?
-    """, (new_status, task_id))
-
-    conn.commit()
-    conn.close()
-
-    status_fa = STATUS_TEXT.get(new_status, new_status)
-
-    await query.edit_message_text(
-        f"""
-✅ وضعیت کار بروزرسانی شد
-
-🆔 شناسه کار: {task_id}
-
-📌 عنوان:
-{title}
-
-📍 وضعیت جدید:
-{status_fa}
-"""
-    )
-
-    if assigned_by and assigned_by != query.from_user.id:
-        try:
-            await context.bot.send_message(
-                chat_id=assigned_by,
-                text=f"""
-📢 بروزرسانی وضعیت کار
-
-🆔 شناسه کار: {task_id}
-
-📌 عنوان:
-{title}
-
-👤 توسط:
-{query.from_user.full_name}
-
-📍 وضعیت جدید:
-{status_fa}
-"""
-            )
-        except Exception as e:
-            print(f"Notify admin error for task {task_id}: {e}")
-USER_STATE = {}
-
 TOKEN = os.getenv("BOT_TOKEN")
+GROUP_CHAT_ID_RAW = os.getenv("GROUP_CHAT_ID")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
-
-if GROUP_CHAT_ID:
+GROUP_CHAT_ID: Optional[int] = None
+if GROUP_CHAT_ID_RAW:
     try:
-        GROUP_CHAT_ID = int(GROUP_CHAT_ID)
+        GROUP_CHAT_ID = int(GROUP_CHAT_ID_RAW)
     except Exception:
         GROUP_CHAT_ID = None
 
-print("BOT_TOKEN loaded:", bool(TOKEN), TOKEN[-6:] if TOKEN else "NO TOKEN")
-
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
-
-CREATE_TITLE = 1
-CREATE_MEMBER = 2
-CREATE_PRIORITY = 3
-CREATE_REMINDER = 4
-
-
-def db():
-    return sqlite3.connect("sam_pro.db")
-
-
-def get_member_id_by_name(name):
-
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT user_id
-        FROM users
-        WHERE full_name=?
-        """,
-        (name,)
-    )
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    if row:
-        return row[0]
-
-    return None
-
-
-async def register_user(update: Update):
-
-    tg_user = update.effective_user
-
-    existing = get_user(tg_user.id)
-
-    if existing:
-        return
-
-    role = "member"
-
-    if count_admins() == 0:
-        role = "admin"
-
-    add_user(
-        tg_user.id,
-        tg_user.username,
-        tg_user.full_name,
-        role,
-        datetime.now().strftime("%Y-%m-%d %H:%M")
-    )
-
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await register_user(update)
-
-    keyboard = [
-        ["➕ کار جدید", "📋 کارها"],
-        ["🧠 تحلیل چت", "🧠 مدیر هوشمند"],
-        ["🎙 فرمان صوتی", "🤖 دستیار هوشمند"],
-        ["📊 گزارش‌ها", "❓ راهنما"],
-        ["👥 اعضا", "👤 پروفایل"],
-        ["⏱ پیگیری"]
-    ]
-    await update.message.reply_text(
-        "🤖 SAM PRO Team Manager V5 Real Merge\n\nکد اصلی حفظ شده و امکانات هوشمند اضافه شده است.",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard,
-            resize_keyboard=True
-        )
-    )
-
-
-async def whoami(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = get_user(
-        update.effective_user.id
-    )
-
-    if not user:
-        return
-
-    role = (
-        "👑 مدیر"
-        if user[3] == "admin"
-        else "👤 عضو"
-    )
-
-    await update.message.reply_text(
-        f"""
-{role}
-
-نام:
-{user[2]}
-
-یوزرنیم:
-@{user[1] if user[1] else "-"}
-"""
-    )
-
-
-async def members(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    users = get_users()
-
-    text = "👥 اعضا\n\n"
-
-    for user in users:
-
-        role = (
-            "👑"
-            if user[3] == "admin"
-            else "👤"
-        )
-
-        text += (
-            f"{role} {user[2]}\n"
-        )
-
-    await update.message.reply_text(
-        text
-    )
-
-
-async def stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    tasks = get_tasks()
-
-    total = len(tasks)
-
-    done_count = len(
-        [
-            t
-            for t in tasks
-            if t[4] == "done"
-        ]
-    )
-
-    pending = total - done_count
-
-    await update.message.reply_text(
-        f"""
-📊 آمار
-
-کل کارها: {total}
-
-انجام شده: {done_count}
-
-باز: {pending}
-"""
-    )
-
-
-async def list_tasks(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    tasks = get_tasks()
-
-    if not tasks:
-
-        await update.message.reply_text(
-            "هیچ کاری ثبت نشده"
-        )
-
-        return
-
-    msg = "📋 لیست کارها\n\n"
-
-    for task in tasks:
-
-        status = (
-            "✅"
-            if task[4] == "done"
-            else "⏳"
-        )
-
-        msg += (
-            f"{task[0]}. "
-            f"{status} "
-            f"{task[1]}\n"
-        )
-
-    await update.message.reply_text(
-        msg
-    )
-async def create_task_start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = get_user(
-        update.effective_user.id
-    )
-
-    if user[3] != "admin":
-
-        await update.message.reply_text(
-            "فقط مدیر می‌تواند کار ایجاد کند."
-        )
-
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "📝 عنوان کار را وارد کن:"
-    )
-
-    return CREATE_TITLE
-
-
-async def create_task_title(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    context.user_data["title"] = (
-        update.message.text
-    )
-
-    users = get_users()
-
-    keyboard = []
-
-    for user in users:
-
-        keyboard.append(
-            [KeyboardButton(user[2])]
-        )
-
-    await update.message.reply_text(
-        "👤 مسئول انجام کار را انتخاب کن:",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard,
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-    )
-
-    return CREATE_MEMBER
-
-
-async def create_task_member(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    context.user_data["member"] = (
-        update.message.text
-    )
-
-    keyboard = [
-        ["🔴 زیاد"],
-        ["🟡 متوسط"],
-        ["🟢 کم"]
-    ]
-
-    await update.message.reply_text(
-        "اولویت را انتخاب کن:",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard,
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-    )
-
-    return CREATE_PRIORITY
-
-async def create_task_priority(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    context.user_data["priority"] = (
-        update.message.text
-    )
-
-    keyboard = [
-        ["⏰ یک ساعت بعد"],
-        ["⏰ دو ساعت بعد"],
-        ["🕒 مشخص کردن زمان"],
-        ["🚫 بدون یادآوری"]
-    ]
-
-    await update.message.reply_text(
-        "⏰ زمان یادآوری را انتخاب کن:",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard,
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-    )
-
-    return CREATE_REMINDER
-
-async def create_task_reminder(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    reminder_choice = update.message.text
-
-    if context.user_data.get("waiting_custom_reminder"):
-
-        try:
-            datetime.strptime(reminder_choice, "%Y-%m-%d %H:%M")
-            reminder_time = reminder_choice
-            context.user_data.pop("waiting_custom_reminder", None)
-
-        except:
-            context.user_data.pop("waiting_custom_reminder", None)
-            await update.message.reply_text(
-                """
-❌ فرمت زمان اشتباه است.
-
-مثال درست:
-2026-06-25 18:00
-
-حالت تنظیم زمان بسته شد تا ربات روی پیام‌های بعدی گیر نکند.
-"""
-            )
-            return ConversationHandler.END
-
-    elif reminder_choice == "⏰ یک ساعت بعد":
-
-        reminder_time = (
-            datetime.now() + timedelta(hours=1)
-        ).strftime("%Y-%m-%d %H:%M")
-
-    elif reminder_choice == "⏰ دو ساعت بعد":
-
-        reminder_time = (
-            datetime.now() + timedelta(hours=2)
-        ).strftime("%Y-%m-%d %H:%M")
-
-    elif reminder_choice == "🕒 مشخص کردن زمان":
-
-        context.user_data["waiting_custom_reminder"] = True
-
-        await update.message.reply_text(
-            """
-🕒 زمان یادآوری را وارد کن.
-
-مثال:
-2026-06-25 18:00
-"""
-        )
-
-        return CREATE_REMINDER
-
-    elif reminder_choice == "🚫 بدون یادآوری":
-
-        reminder_time = "none"
-
-    else:
-
-        context.user_data.pop("waiting_custom_reminder", None)
-        await update.message.reply_text(
-            "❌ انتخاب یادآوری نامعتبر بود. حالت ساخت کار بسته شد. برای ساخت دوباره /newtask را بزن."
-        )
-
-        return ConversationHandler.END
-
-    reminder_text = (
-        "بدون یادآوری"
-        if reminder_time == "none"
-        else reminder_time
-    )
-
-    title = context.user_data["title"]
-
-    member_name = (
-        context.user_data["member"]
-    )
-
-    priority = (
-        context.user_data["priority"]
-    )
-
-    assigned_to = (
-        get_member_id_by_name(
-            member_name
-        )
-    )
-
-    create_task(
-        title=title,
-        assigned_to=assigned_to,
-        assigned_by=update.effective_user.id,
-        priority=priority,
-        reminder_time=reminder_time,
-        created_at=datetime.now().strftime(
-            "%Y-%m-%d %H:%M"
-        )
-    )
-
-    await update.message.reply_text(
-        f"""
-✅ کار ثبت شد
-
-عنوان:
-{title}
-
-مسئول:
-{member_name}
-
-اولویت:
-{priority}
-
-یادآوری:
-{reminder_text}
-"""
-    )
-
-    try:
-
-        await context.bot.send_message(
-            chat_id=assigned_to,
-            text=f"""
-📌 کار جدید
-
-عنوان:
-{title}
-
-اولویت:
-{priority}
-
-زمان یادآوری:
-{reminder_text}
-"""
-        )
-
-    except:
-
-        pass
-
-    return ConversationHandler.END
-
-
-async def cancel_task(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "عملیات لغو شد."
-    )
-
-    return ConversationHandler.END
-
-
-async def done_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not context.args:
-
-        await update.message.reply_text(
-            "مثال:\n/done 1"
-        )
-
-        return
-
-    try:
-
-        task_id = int(
-            context.args[0]
-        )
-
-    except:
-
-        await update.message.reply_text(
-            "شناسه نامعتبر است."
-        )
-
-        return
-
-    complete_task(task_id)
-
-    await update.message.reply_text(
-        "✅ کار انجام شد."
-    )
-
-async def buttons(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await register_user(update)
-
-    text = update.message.text
-
-    if text == "📋 کارها":
-        await open_tasks_panel(update, context)
-        return
-
-    if text == "⏱ پیگیری":
-        await open_tasks_panel(update, context)
-        return
-
-    if text == "🧠 تحلیل چت":
-
-        keyboard = [
-            ["⏱ یک ساعت اخیر"],
-            ["⏱ دو ساعت اخیر"],
-            ["📅 دیروز"],
-            ["📊 ۷ روز اخیر"],
-            ["⬅️بازگشت"]
-        ]
-
-        await update.message.reply_text(
-            "🧠 بازه تحلیل چت را انتخاب کن:",
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard,
-                resize_keyboard=True
-            )
-        )
-
-        return
-
-    if text == "⏱ یک ساعت اخیر":
-        await summary_command(update, context, "1h")
-        return
-
-    if text == "⏱ دو ساعت اخیر":
-        await summary_command(update, context, "2h")
-        return
-
-    if text == "📅 دیروز":
-        await summary_command(update, context, "yesterday")
-        return
-
-    if text == "📊 ۷ روز اخیر":
-        await summary_command(update, context, "7d")
-        return
-
-    if text == "⬅️بازگشت":
-        await start(update, context)
-        return
-
-    if text == "🤖 دستیار هوشمند":
-
-        USER_STATE[
-            update.effective_user.id
-        ] = "ai_mode"
-
-        await update.message.reply_text(
-            """
-🤖 دستیار هوشمند فعال شد
-
-هر سوالی داری بنویس.
-
-/exit
-"""
-        )
-
-        return
-
-    if text == "👥 اعضا":
-        await members(update, context)
-        return
-
-    if text == "📊 آمار":
-        await stats(update, context)
-        return
-
-    if text == "👤 پروفایل":
-        await whoami(update, context)
-        return
-
-    if text == "➕ کار جدید":
-        await open_task_panel(update, context)
-        return
-
-    if "فرمان صوتی" in text or "کار با ویس" in text:
-
-        context.user_data["waiting_voice_task"] = True
-
-        await update.message.reply_text(
-            """
-🎙 فرمان صوتی فعال شد
-
-حالا یک ویس بفرست.
-
-فرمان‌هایی که می‌فهمم:
-
-📋 لیست کارها را بفرست
-📅 کارهای امروز را بگو
-📆 کارهای فردا را بگو
-⏳ کارهای مانده را بگو
-🗑 کار شماره ۱۲ را پاک کن
-
-همچنین:
-➕ یک کار جدید بساز
-✅ وضعیت کار شماره ۱۲ را انجام‌شده کن
-📝 برای کار شماره ۸ توضیح اضافه کن
-⏰ یادآوری کار شماره ۵ را تغییر بده
-"""
-        )
-
-        return
-task_conversation = ConversationHandler(
-
-    entry_points=[
-        CommandHandler(
-            "newtask",
-            create_task_start
-        )
-    ],
-
-    states={
-
-        CREATE_TITLE: [
-            MessageHandler(
-                filters.TEXT &
-                ~filters.COMMAND,
-                create_task_title
-            )
-        ],
-
-        CREATE_MEMBER: [
-            MessageHandler(
-                filters.TEXT &
-                ~filters.COMMAND,
-                create_task_member
-            )
-        ],
-
-        CREATE_PRIORITY: [
-            MessageHandler(
-                filters.TEXT &
-                ~filters.COMMAND,
-                create_task_priority
-            )
-        ],
-
-        CREATE_REMINDER: [
-            MessageHandler(
-                filters.TEXT &
-                ~filters.COMMAND,
-                create_task_reminder
-            )
-        ]
-    },
-
-    fallbacks=[
-        CommandHandler(
-            "cancel",
-            cancel_task
-        )
-    ]
-)
-
-async def done_task(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not context.args:
-
-        await update.message.reply_text(
-            "مثال:\n/done 1"
-        )
-
-        return
-
-    try:
-
-        task_id = int(
-            context.args[0]
-        )
-
-        complete_task(task_id)
-
-        await update.message.reply_text(
-            "✅ کار انجام شد"
-        )
-
-    except Exception as e:
-
-        await update.message.reply_text(
-            f"خطا:\n{e}"
-        )
-
-
-async def ai_command(update, context):
-
-    question = " ".join(context.args)
-
-    if not question:
-        await update.message.reply_text(
-            "مثال:\n/ai سلام"
-        )
-        return
-
-    await update.message.reply_text(
-        "🤖 در حال پردازش..."
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "user",
-                    "content": question
-                }
-            ]
-        )
-
-        answer = response.choices[0].message.content
-
-    except Exception as e:
-        answer = (
-            "❌ خطا در ارتباط با OpenAI\n\n"
-            f"{e}"
-        )
-
-    await update.message.reply_text(answer)
-
-
-async def exit_ai(update, context):
-
-    USER_STATE.pop(
-        update.effective_user.id,
-        None
-    )
-
-    await update.message.reply_text(
-        "✅ دستیار هوشمند غیرفعال شد"
-    )
-
-
-async def ai_chat(update, context):
-
-    user_id = update.effective_user.id
-
-    if USER_STATE.get(user_id) != "ai_mode":
-        return
-
-    question = update.message.text
-
-    try:
-
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "user",
-                    "content": question
-                }
-            ]
-        )
-
-        answer = response.choices[0].message.content
-
-    except Exception as e:
-
-        answer = f"❌ {e}"
-
-    await update.message.reply_text(answer)
-SILENT_IGNORE_TEXTS = {
-    "📋 کارها",
-    "🤖 دستیار هوشمند",
-    "👥 اعضا",
-    "📊 آمار",
-    "👤 پروفایل",
-    "➕ کار جدید",
-    "⏱ پیگیری",
-    "🔴 زیاد",
-    "🟡 متوسط",
-    "🟢 کم",
-    "⏰ یک ساعت بعد",
-    "⏰ دو ساعت بعد",
-    "🕒 مشخص کردن زمان",
-    "🚫 بدون یادآوری"
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+PROJECTS = ["ØªØ®ØªÙ", "ÙÛÙÙ", "Ù¾ØªØ±ÙØ´ÛÙÛ", "ÙØ§ÙÛ", "ØºÙØ§Øª", "ØºÛØ±Ù"]
+PRIORITIES = ["ÙÙØ±Û", "Ø²ÛØ§Ø¯", "ÙØªÙØ³Ø·", "Ú©Ù"]
+STATUSES = {
+    "pending": "Ø¨Ø§Ø²",
+    "in_progress": "Ø¯Ø± Ø­Ø§Ù Ù¾ÛÚ¯ÛØ±Û",
+    "waiting": "ÙÙØªØ¸Ø± Ù¾Ø§Ø³Ø®",
+    "done": "Ø§ÙØ¬Ø§Ù Ø´Ø¯",
+    "cancelled": "ÙØºÙ Ø´Ø¯",
 }
-
-
-def init_silent_ai_tables():
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            user_id INTEGER,
-            full_name TEXT,
-            username TEXT,
-            text TEXT,
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ai_suggestions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            title TEXT,
-            member_name TEXT,
-            assigned_to INTEGER,
-            priority TEXT,
-            reminder_time TEXT,
-            source_text TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def save_chat_message(update: Update):
-
-    if not update.message or not update.message.text:
-        return
-
-    user = update.effective_user
-    chat = update.effective_chat
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cutoff = (
-        datetime.now() - timedelta(days=7)
-    ).strftime("%Y-%m-%d %H:%M")
-
-    cur.execute("""
-        DELETE FROM chat_messages
-        WHERE created_at < ?
-    """, (cutoff,))
-
-    cur.execute("""
-        INSERT INTO chat_messages (
-            chat_id,
-            user_id,
-            full_name,
-            username,
-            text,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        chat.id,
-        user.id,
-        user.full_name,
-        user.username,
-        update.message.text,
-        datetime.now().strftime("%Y-%m-%d %H:%M")
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_recent_chat_messages(chat_id, limit=30):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT full_name, text, created_at
-        FROM chat_messages
-        WHERE chat_id=?
-        ORDER BY id DESC
-        LIMIT ?
-    """, (chat_id, limit))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    rows.reverse()
-
-    return rows
-
-
-def get_admin_ids():
-
-    users = get_users()
-
-    admins = []
-
-    for user in users:
-        if user[3] == "admin":
-            admins.append(user[0])
-
-    return admins
-
-
-def extract_json_array(text):
-
-    try:
-        return json.loads(text)
-    except:
-        pass
-
-    try:
-        start = text.find("[")
-        end = text.rfind("]") + 1
-
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-
-    except:
-        pass
-
-    return []
-
-
-def save_ai_suggestion(
-    chat_id,
-    title,
-    member_name,
-    assigned_to,
-    priority,
-    reminder_time,
-    source_text
-):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id
-        FROM ai_suggestions
-        WHERE title=?
-        AND status='pending'
-        LIMIT 1
-    """, (title,))
-
-    existing = cur.fetchone()
-
-    if existing:
-        conn.close()
-        return None
-
-    cur.execute("""
-        INSERT INTO ai_suggestions (
-            chat_id,
-            title,
-            member_name,
-            assigned_to,
-            priority,
-            reminder_time,
-            source_text,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-    """, (
-        chat_id,
-        title,
-        member_name,
-        assigned_to,
-        priority,
-        reminder_time,
-        source_text,
-        datetime.now().strftime("%Y-%m-%d %H:%M")
-    ))
-
-    suggestion_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    return suggestion_id
-
-
-def get_ai_suggestion(suggestion_id):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, chat_id, title, member_name, assigned_to, priority, reminder_time, source_text, status
-        FROM ai_suggestions
-        WHERE id=?
-    """, (suggestion_id,))
-
-    row = cur.fetchone()
-    conn.close()
-
-    return row
-
-
-def update_ai_suggestion_status(suggestion_id, status):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE ai_suggestions
-        SET status=?
-        WHERE id=?
-    """, (status, suggestion_id))
-
-    conn.commit()
-    conn.close()
-
-
-async def silent_ai_analyze(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    chat_id = update.effective_chat.id
-
-    messages = get_recent_chat_messages(chat_id, limit=30)
-
-    if len(messages) < 3:
-        return
-
-    history = ""
-
-    for full_name, text, created_at in messages:
-        history += f"{created_at} | {full_name}: {text}\n"
-
-    prompt = f"""
-تو دستیار مدیریت کارها هستی.
-
-از متن چت زیر، فقط کارهای واقعی و قابل پیگیری را استخراج کن.
-اگر چیزی قطعی نیست، کاری نساز.
-
-خروجی فقط JSON باشد.
-هیچ توضیح اضافه ننویس.
-
-فرمت خروجی:
-[
-  {{
-    "title": "عنوان کار",
-    "assigned_to": "نام مسئول اگر مشخص بود وگرنه خالی",
-    "priority": "🔴 زیاد یا 🟡 متوسط یا 🟢 کم",
-    "reminder_time": "none",
-    "reason": "جمله‌ای که باعث شد این کار را تشخیص بدهی"
-  }}
-]
-
-چت:
-{history}
-"""
-
-    try:
-
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "تو فقط JSON معتبر خروجی می‌دهی و کارهای قابل پیگیری را از چت استخراج می‌کنی."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
-
-        content = response.choices[0].message.content
-
-    except Exception as e:
-        print(f"Silent AI error: {e}")
-        return
-
-    tasks = extract_json_array(content)
-
-    if not tasks:
-        return
-
-    admins = get_admin_ids()
-
-    if not admins:
-        return
-
-    for item in tasks:
-
-        title = str(item.get("title", "")).strip()
-
-        if not title:
-            continue
-
-        member_name = str(item.get("assigned_to", "")).strip()
-
-        priority = str(
-            item.get("priority", "🟡 متوسط")
-        ).strip()
-
-        if priority not in ["🔴 زیاد", "🟡 متوسط", "🟢 کم"]:
-            priority = "🟡 متوسط"
-
-        reminder_time = str(
-            item.get("reminder_time", "none")
-        ).strip()
-
-        reason = str(
-            item.get("reason", "")
-        ).strip()
-
-        assigned_to = None
-
-        if member_name:
-            assigned_to = get_member_id_by_name(member_name)
-
-        suggestion_id = save_ai_suggestion(
-            chat_id=chat_id,
-            title=title,
-            member_name=member_name,
-            assigned_to=assigned_to,
-            priority=priority,
-            reminder_time=reminder_time,
-            source_text=reason
-        )
-
-        if not suggestion_id:
-            continue
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "✅ ثبت کار",
-                    callback_data=f"suggestion:{suggestion_id}:approve"
-                ),
-                InlineKeyboardButton(
-                    "❌ رد",
-                    callback_data=f"suggestion:{suggestion_id}:reject"
-                )
-            ]
-        ])
-
-        text = f"""
-🤖 پیشنهاد کار از چت
-
-📌 عنوان:
-{title}
-
-👤 مسئول تشخیص‌داده‌شده:
-{member_name if member_name else "نامشخص"}
-
-🔥 اولویت:
-{priority}
-
-📝 دلیل:
-{reason if reason else "-"}
-"""
-
-        for admin_id in admins:
-
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=text,
-                    reply_markup=keyboard
-                )
-
-            except Exception as e:
-                print(f"Send suggestion error: {e}")
-
-
-async def suggestion_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    user = get_user(query.from_user.id)
-
-    if not user or user[3] != "admin":
-        await query.edit_message_text(
-            "فقط مدیر می‌تواند این پیشنهاد را ثبت یا رد کند."
-        )
-        return
-
-    data = query.data.split(":")
-
-    if len(data) != 3:
-        await query.edit_message_text("دستور نامعتبر است.")
-        return
-
-    suggestion_id = int(data[1])
-    action = data[2]
-
-    suggestion = get_ai_suggestion(suggestion_id)
-
-    if not suggestion:
-        await query.edit_message_text("این پیشنهاد پیدا نشد.")
-        return
-
-    (
-        sid,
-        chat_id,
-        title,
-        member_name,
-        assigned_to,
-        priority,
-        reminder_time,
-        source_text,
-        status
-    ) = suggestion
-
-    if status != "pending":
-        await query.edit_message_text("این پیشنهاد قبلاً بررسی شده است.")
-        return
-
-    if action == "reject":
-
-        update_ai_suggestion_status(suggestion_id, "rejected")
-
-        await query.edit_message_text(
-            f"""
-❌ پیشنهاد رد شد
-
-📌 عنوان:
-{title}
-"""
-        )
-
-        return
-
-    if action == "approve":
-
-        if not assigned_to:
-            assigned_to = query.from_user.id
-
-        create_task(
-            title=title,
-            assigned_to=assigned_to,
-            assigned_by=query.from_user.id,
-            priority=priority,
-            reminder_time=reminder_time,
-            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
-
-        update_ai_suggestion_status(suggestion_id, "approved")
-
-        await query.edit_message_text(
-            f"""
-✅ کار ثبت شد
-
-📌 عنوان:
-{title}
-
-🔥 اولویت:
-{priority}
-"""
-        )
-
-        try:
-            await context.bot.send_message(
-                chat_id=assigned_to,
-                text=f"""
-📌 کار جدید از تحلیل چت
-
-عنوان:
-{title}
-
-اولویت:
-{priority}
-"""
-            )
-        except:
-            pass
-
-
-async def silent_message_watcher(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message or not update.message.text:
-        return
-
-    if update.effective_user and update.effective_user.is_bot:
-        return
-
-    text = update.message.text
-
-    if text in SILENT_IGNORE_TEXTS:
-        return
-
-    if USER_STATE.get(update.effective_user.id) == "ai_mode":
-        return
-
-    await register_user(update)
-
-    save_chat_message(update)
-
-    counter = context.chat_data.get("silent_counter", 0)
-    counter += 1
-
-    context.chat_data["silent_counter"] = counter
-
-    if counter >= 5:
-        context.chat_data["silent_counter"] = 0
-        await silent_ai_analyze(update, context)
-def get_chat_messages_between(chat_id, start_time, end_time):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT full_name, text, created_at
-        FROM chat_messages
-        WHERE chat_id=?
-        AND created_at >= ?
-        AND created_at <= ?
-        ORDER BY id ASC
-    """, (
-        chat_id,
-        start_time.strftime("%Y-%m-%d %H:%M"),
-        end_time.strftime("%Y-%m-%d %H:%M")
-    ))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return rows
-def resolve_summary_range(text):
-
-    now = datetime.now()
-
-    text = text.lower()
-
-    if "1h" in text or "یک ساعت" in text or "۱ ساعت" in text:
-        return now - timedelta(hours=1), now, "یک ساعت اخیر"
-
-    if "2h" in text or "دو ساعت" in text or "۲ ساعت" in text:
-        return now - timedelta(hours=2), now, "دو ساعت اخیر"
-
-    if "yesterday" in text or "دیروز" in text:
-        yesterday = now - timedelta(days=1)
-
-        start = yesterday.replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
-
-        end = yesterday.replace(
-            hour=23,
-            minute=59,
-            second=0,
-            microsecond=0
-        )
-
-        return start, end, "دیروز"
-
-    if "7d" in text or "هفته" in text or "۷ روز" in text or "7 روز" in text:
-        return now - timedelta(days=7), now, "۷ روز اخیر"
-
-    return now - timedelta(hours=1), now, "یک ساعت اخیر"
-
-
-async def summary_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    forced=None
-):
-
-    chat_id = update.effective_chat.id
-
-    query_text = forced if forced else " ".join(context.args)
-
-    if not query_text:
-        query_text = "1h"
-
-    start_time, end_time, label = resolve_summary_range(query_text)
-
-    messages = get_chat_messages_between(
-        chat_id,
-        start_time,
-        end_time
-    )
-
-    if not messages:
-        await update.message.reply_text(
-            f"برای بازه «{label}» پیامی ذخیره نشده."
-        )
-        return
-
-    history = ""
-
-    for full_name, text, created_at in messages:
-        history += f"{created_at} | {full_name}: {text}\n"
-
-    await update.message.reply_text(
-        "⏳ در حال خلاصه‌سازی چت..."
-    )
-
-    prompt = f"""
-چت زیر مربوط به بازه {label} است.
-
-لطفاً خلاصه دقیق و کاربردی بده:
-
-1. خلاصه کلی بحث
-2. تصمیم‌های گرفته‌شده
-3. کارهای قابل پیگیری
-4. مسئول هر کار اگر مشخص است
-5. نکات مهم
-6. ریسک‌ها یا موارد مبهم
-
-متن چت:
-{history}
-"""
-
-    try:
-
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "تو دستیار خلاصه‌سازی و مدیریت کارها هستی. پاسخ را فارسی، مرتب و خلاصه بده."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
-
-        answer = response.choices[0].message.content
-
-    except Exception as e:
-
-        answer = f"❌ خطا در خلاصه‌سازی:\n{e}"
-
-    await update.message.reply_text(answer)    
-
-TASK_DRAFTS = {}
-
-
-def get_task_draft(user_id):
-
-    if user_id not in TASK_DRAFTS:
-        TASK_DRAFTS[user_id] = {
-    "title": "",
-    "assigned_to": None,
-    "member_name": "",
-    "priority": "🟡 متوسط",
-    "project": "🧩 عمومی",
-    "tag": "🧩 عمومی",
-    "reminder_time": "none",
-    "reminder_text": "بدون یادآوری",
-    "panel_chat_id": None,
-    "panel_message_id": None
+STATUS_EMOJI = {
+    "pending": "ð",
+    "in_progress": "ð",
+    "waiting": "â³",
+    "done": "â",
+    "cancelled": "â",
 }
+USER_STATE: Dict[int, str] = {}
 
-    return TASK_DRAFTS[user_id]
+# ------------------------- normalizers -------------------------
 
+def normalize_text(text: str) -> str:
+    text = text or ""
+    text = text.replace("Ù", "Û").replace("Ù", "Ú©")
+    return text.strip()
 
-def task_panel_text(draft):
 
-    title = draft["title"] if draft["title"] else "ثبت نشده"
-
-    member = (
-        f'{draft["member_name"]} | ID: {draft["assigned_to"]}'
-        if draft["assigned_to"]
-        else "ثبت نشده"
-    )
-
-    return f"""
-🧾 پنل ایجاد کار
-
-📝 عنوان کار:
-{title}
-
-👤 مسئول / پیگیری‌کننده:
-{member}
-
-🔥 اولویت:
-{draft["priority"]}
-
-🏗 پروژه:
-{draft["project"]}
-
-🏷 دسته‌بندی:
-{draft["tag"]}
-
-⏰ یادآوری:
-{draft["reminder_text"]}
-"""
-
-
-
-def task_panel_keyboard():
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📝 عنوان کار",
-                callback_data="draft:title"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👤 مسئول",
-                callback_data="draft:members"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔥 اولویت",
-                callback_data="draft:priority_menu"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏗 پروژه",
-                callback_data="draft:project_menu"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏷 دسته‌بندی",
-                callback_data="draft:tag_menu"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⏰ یادآوری",
-                callback_data="draft:reminder_menu"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✅ ثبت کار",
-                callback_data="draft:save"
-            ),
-            InlineKeyboardButton(
-                "❌ لغو",
-                callback_data="draft:cancel"
-            )
-        ]
-    ])
-async def open_task_panel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await register_user(update)
-
-    user = get_user(update.effective_user.id)
-
-    if not user or user[3] != "admin":
-        await update.message.reply_text(
-            "فقط مدیر می‌تواند کار ایجاد کند."
-        )
-        return
-
-    draft = get_task_draft(update.effective_user.id)
-
-    msg = await update.message.reply_text(
-        task_panel_text(draft),
-        reply_markup=task_panel_keyboard()
-    )
-
-    draft["panel_chat_id"] = msg.chat_id
-    draft["panel_message_id"] = msg.message_id
-
-
-async def edit_task_panel(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id,
-    extra_text=""
-):
-
-    draft = get_task_draft(user_id)
-
-    text = task_panel_text(draft)
-
-    if extra_text:
-        text += f"\n\n{extra_text}"
-
-    await context.bot.edit_message_text(
-        chat_id=draft["panel_chat_id"],
-        message_id=draft["panel_message_id"],
-        text=text,
-        reply_markup=task_panel_keyboard()
-    )
-
-
-async def task_draft_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    draft = get_task_draft(user_id)
-
-    data = query.data
-
-    if data == "draft:title":
-
-        context.user_data["task_draft_waiting"] = "title"
-
-        await query.edit_message_text(
-            task_panel_text(draft)
-            + "\n\n📝 عنوان کار را در پیام بعدی بنویس:",
-            reply_markup=task_panel_keyboard()
-        )
-
-        return
-
-    if data == "draft:members":
-
-        users = get_users()
-
-        keyboard = []
-
-        for user in users:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{user[2]} | ID: {user[0]}",
-                    callback_data=f"draft:member:{user[0]}"
-                )
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "⬅️ برگشت",
-                callback_data="draft:back"
-            )
-        ])
-
-        await query.edit_message_text(
-            "👤 مسئول / پیگیری‌کننده را انتخاب کن:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        return
-
-    if data.startswith("draft:member:"):
-
-        selected_id = int(data.split(":")[2])
-
-        users = get_users()
-
-        selected_name = ""
-
-        for user in users:
-            if user[0] == selected_id:
-                selected_name = user[2]
-                break
-
-        draft["assigned_to"] = selected_id
-        draft["member_name"] = selected_name
-
-        await query.edit_message_text(
-            task_panel_text(draft),
-            reply_markup=task_panel_keyboard()
-        )
-
-        return
-
-    if data == "draft:priority_menu":
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔴 زیاد",
-                    callback_data="draft:priority:🔴 زیاد"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🟡 متوسط",
-                    callback_data="draft:priority:🟡 متوسط"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🟢 کم",
-                    callback_data="draft:priority:🟢 کم"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ برگشت",
-                    callback_data="draft:back"
-                )
-            ]
-        ])
-
-        await query.edit_message_text(
-            "🔥 اولویت را انتخاب کن:",
-            reply_markup=keyboard
-        )
-
-        return
-
-    if data.startswith("draft:priority:"):
-
-        priority = data.replace("draft:priority:", "")
-
-        draft["priority"] = priority
-
-        await query.edit_message_text(
-            task_panel_text(draft),
-            reply_markup=task_panel_keyboard()
-        )
-
-        return
-    if data == "draft:project_menu":
-
-        keyboard = []
-
-        for i, project in enumerate(PROJECT_OPTIONS):
-            keyboard.append([
-                InlineKeyboardButton(
-                    project,
-                    callback_data=f"draft:project:{i}"
-                )
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "⬅️ برگشت",
-                callback_data="draft:back"
-            )
-        ])
-
-        await query.edit_message_text(
-            "🏗 پروژه را انتخاب کن:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        return
-
-    if data.startswith("draft:project:"):
-
-        index = int(data.split(":")[2])
-
-        if 0 <= index < len(PROJECT_OPTIONS):
-            draft["project"] = PROJECT_OPTIONS[index]
-
-        await query.edit_message_text(
-            task_panel_text(draft),
-            reply_markup=task_panel_keyboard()
-        )
-
-        return
-
-    if data == "draft:tag_menu":
-
-        keyboard = []
-
-        for i, tag in enumerate(TAG_OPTIONS):
-            keyboard.append([
-                InlineKeyboardButton(
-                    tag,
-                    callback_data=f"draft:tag:{i}"
-                )
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "⬅️ برگشت",
-                callback_data="draft:back"
-            )
-        ])
-
-        await query.edit_message_text(
-            "🏷 دسته‌بندی را انتخاب کن:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        return
-
-    if data.startswith("draft:tag:"):
-
-        index = int(data.split(":")[2])
-
-        if 0 <= index < len(TAG_OPTIONS):
-            draft["tag"] = TAG_OPTIONS[index]
-
-        await query.edit_message_text(
-            task_panel_text(draft),
-            reply_markup=task_panel_keyboard()
-        )
-
-        return 
-
-    if data == "draft:reminder_menu":
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⏰ یک ساعت بعد",
-                    callback_data="draft:reminder:1h"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⏰ دو ساعت بعد",
-                    callback_data="draft:reminder:2h"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🕒 مشخص کردن زمان",
-                    callback_data="draft:reminder:custom"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🚫 بدون یادآوری",
-                    callback_data="draft:reminder:none"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ برگشت",
-                    callback_data="draft:back"
-                )
-            ]
-        ])
-
-        await query.edit_message_text(
-            "⏰ زمان یادآوری را انتخاب کن:",
-            reply_markup=keyboard
-        )
-
-        return
-
-    if data.startswith("draft:reminder:"):
-
-        reminder = data.split(":")[2]
-
-        if reminder == "1h":
-
-            draft["reminder_time"] = (
-                datetime.now() + timedelta(hours=1)
-            ).strftime("%Y-%m-%d %H:%M")
-
-            draft["reminder_text"] = "یک ساعت بعد"
-
-        elif reminder == "2h":
-
-            draft["reminder_time"] = (
-                datetime.now() + timedelta(hours=2)
-            ).strftime("%Y-%m-%d %H:%M")
-
-            draft["reminder_text"] = "دو ساعت بعد"
-
-        elif reminder == "none":
-
-            draft["reminder_time"] = "none"
-            draft["reminder_text"] = "بدون یادآوری"
-
-        elif reminder == "custom":
-
-            context.user_data["task_draft_waiting"] = "reminder"
-
-            await query.edit_message_text(
-                task_panel_text(draft)
-                + """
-
-🕒 زمان یادآوری را در پیام بعدی وارد کن.
-
-مثال:
-2026-06-25 18:00
-""",
-                reply_markup=task_panel_keyboard()
-            )
-
-            return
-
-        await query.edit_message_text(
-            task_panel_text(draft),
-            reply_markup=task_panel_keyboard()
-        )
-
-        return
-
-    if data == "draft:back":
-
-        await query.edit_message_text(
-            task_panel_text(draft),
-            reply_markup=task_panel_keyboard()
-        )
-
-        return
-
-    if data == "draft:cancel":
-
-        TASK_DRAFTS.pop(user_id, None)
-
-        await query.edit_message_text(
-            "❌ ایجاد کار لغو شد."
-        )
-
-        return
-
-    if data == "draft:save":
-
-        if not draft["title"]:
-            await query.edit_message_text(
-                task_panel_text(draft)
-                + "\n\n⚠️ اول عنوان کار را وارد کن.",
-                reply_markup=task_panel_keyboard()
-            )
-            return
-
-        if not draft["assigned_to"]:
-            await query.edit_message_text(
-                task_panel_text(draft)
-                + "\n\n⚠️ اول مسئول / پیگیری‌کننده را انتخاب کن.",
-                reply_markup=task_panel_keyboard()
-            )
-            return
-
-        create_task(
-            title=draft["title"],
-            assigned_to=draft["assigned_to"],
-            assigned_by=query.from_user.id,
-            priority=draft["priority"],
-            reminder_time=draft["reminder_time"],
-            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
-        conn = sqlite3.connect("sam_pro.db")
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET project=?, tag=?
-            WHERE id = (
-                SELECT id
-                FROM tasks
-                WHERE title=?
-                AND assigned_to=?
-                AND assigned_by=?
-                ORDER BY id DESC
-                LIMIT 1
-            )
-        """, (
-            draft["project"],
-            draft["tag"],
-            draft["title"],
-            draft["assigned_to"],
-            query.from_user.id
-        ))
-
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_text(
-            f"""
-✅ کار ثبت شد
-
-📝 عنوان:
-{draft["title"]}
-
-👤 مسئول:
-{draft["member_name"]}
-
-🔥 اولویت:
-{draft["priority"]}
-
-🏗 پروژه:
-{draft["project"]}
-
-🏷 دسته‌بندی:
-{draft["tag"]}
-
-⏰ یادآوری
-{draft["reminder_text"]}
-"""
-        )
-
-        try:
-            await context.bot.send_message(
-                chat_id=draft["assigned_to"],
-                text=f"""
-📌 کار جدید
-
-📝 عنوان:
-{draft["title"]}
-
-🔥 اولویت
-{draft["priority"]}
-
-🏗 پروژه:
-{draft["project"]}
-
-🏷 دسته‌بندی:
-{draft["tag"]}
-
-⏰ یادآوری
-{draft["reminder_text"]}
-"""
-            )
-        except:
-            pass
-
-        TASK_DRAFTS.pop(user_id, None)
-
-        return
-
-
-async def task_draft_text_input(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    waiting = context.user_data.get("task_draft_waiting")
-
-    if not waiting:
-        return
-
-    user_id = update.effective_user.id
-    draft = get_task_draft(user_id)
-
-    text = update.message.text.strip()
-
-    if waiting == "title":
-
-        draft["title"] = text
-
-    elif waiting == "reminder":
-
-        try:
-            datetime.strptime(text, "%Y-%m-%d %H:%M")
-            draft["reminder_time"] = text
-            draft["reminder_text"] = text
-
-        except:
-            context.user_data.pop("task_draft_waiting", None)
-            await update.message.reply_text(
-                """
-❌ فرمت زمان اشتباه است.
-
-مثال درست:
-2026-06-25 18:00
-
-حالت تنظیم زمان بسته شد تا ربات روی پیام‌های بعدی گیر نکند.
-"""
-            )
-            return
-
-    context.user_data.pop("task_draft_waiting", None)
-
-    try:
-        await update.message.delete()
-    except:
-        pass
-
-    await edit_task_panel(
-        context,
-        user_id
-    )
-
-    raise ApplicationHandlerStop
-async def join_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await register_user(update)
-
-    await update.message.reply_text(
-        f"""
-✅ ثبت شد
-
-👤 نام:
-{update.effective_user.full_name}
-
-🆔 Telegram ID:
-{update.effective_user.id}
-
-از این به بعد می‌شود این شخص را به‌عنوان مسئول کار انتخاب کرد.
-"""
-    )
-def get_open_tasks_for_panel():
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at, project, tag
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-        ORDER BY id DESC
-    """)
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return rows
-
-
-def get_task_by_id(task_id):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at, project, tag
-        FROM tasks
-        WHERE id=?
-    """, (task_id,))
-
-    row = cur.fetchone()
-    conn.close()
-
-    return row
-
-
-def task_list_keyboard():
-
-    tasks = get_open_tasks_for_panel()
-
-    keyboard = []
-
-    if not tasks:
-        keyboard.append([
-            InlineKeyboardButton(
-                "✅ کار بازی وجود ندارد",
-                callback_data="taskmenu:none"
-            )
-        ])
-    else:
-        for task in tasks:
-            task_id = task[0]
-            title = task[1]
-            priority = task[4]
-            status = task[5]
-
-            status_fa = STATUS_TEXT.get(status, status)
-
-            short_title = title[:35]
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"#{task_id} | {priority} | {status_fa} | {short_title}",
-                    callback_data=f"taskmenu:open:{task_id}"
-                )
-            ])
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def open_tasks_panel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "📋 لیست کارهای باز:",
-        reply_markup=task_list_keyboard()
-    )
-
-
-def single_task_keyboard(task_id):
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✅ انجام شد",
-                callback_data=f"taskmenu:status:{task_id}:done"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔄 در حال پیگیری",
-                callback_data=f"taskmenu:status:{task_id}:in_progress"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⏳ منتظر پاسخ",
-                callback_data=f"taskmenu:status:{task_id}:waiting"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🗑 حذف از لیست",
-                callback_data=f"taskmenu:status:{task_id}:cancelled"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⬅️ برگشت به لیست",
-                callback_data="taskmenu:list"
-            )
-        ]
-    ])
-
-
-def single_task_text(task):
-
-    task_id = task[0]
-    title = task[1]
-    assigned_to = task[2]
-    assigned_by = task[3]
-    priority = task[4]
-    status = task[5]
-    reminder_time = task[6]
-    created_at = task[7]
-    project = task[8] if len(task) > 8 and task[8] else "🧩 عمومی"
-    tag = task[9] if len(task) > 9 and task[9] else "🧩 عمومی"
-
-    status_fa = STATUS_TEXT.get(status, status)
-
-    reminder_text = (
-        "بدون یادآوری"
-        if reminder_time == "none"
-        else reminder_time
-    )
-
-    return f"""
-📌 جزئیات کار
-
-🆔 شناسه:
-{task_id}
-
-📝 عنوان:
-{title}
-
-👤 مسئول:
-{assigned_to}
-
-👨‍💼 ثبت‌کننده:
-{assigned_by}
-
-🔥 اولویت:
-{priority}
-
-🏗 پروژه:
-{project}
-
-🏷 دسته‌بندی:
-{tag}
-
-📍 وضعیت:
-{status_fa}
-
-⏰ یادآوری:
-{reminder_text}
-
-🕒 تاریخ ثبت:
-{created_at}
-"""
-
-
-async def task_menu_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data.split(":")
-
-    if query.data == "taskmenu:none":
-        return
-
-    if query.data == "taskmenu:list":
-
-        await query.edit_message_text(
-            "📋 لیست کارهای باز:",
-            reply_markup=task_list_keyboard()
-        )
-
-        return
-
-    if len(data) >= 3 and data[1] == "open":
-
-        task_id = int(data[2])
-
-        task = get_task_by_id(task_id)
-
-        if not task:
-            await query.edit_message_text(
-                "❌ این کار پیدا نشد."
-            )
-            return
-
-        await query.edit_message_text(
-            single_task_text(task),
-            reply_markup=single_task_keyboard(task_id)
-        )
-
-        return
-
-    if len(data) >= 4 and data[1] == "status":
-
-        task_id = int(data[2])
-        new_status = data[3]
-
-        conn = sqlite3.connect("sam_pro.db")
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET status=?
-            WHERE id=?
-        """, (
-            new_status,
-            task_id
-        ))
-
-        conn.commit()
-        conn.close()
-
-        if new_status == "cancelled":
-
-            await query.edit_message_text(
-                "🗑 کار از لیست حذف شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ برگشت به لیست",
-                            callback_data="taskmenu:list"
-                        )
-                    ]
-                ])
-            )
-
-            return
-
-        if new_status == "done":
-
-            await query.edit_message_text(
-                "✅ کار انجام‌شده ثبت شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ برگشت به لیست",
-                            callback_data="taskmenu:list"
-                        )
-                    ]
-                ])
-            )
-
-            return
-
-        task = get_task_by_id(task_id)
-
-        await query.edit_message_text(
-            single_task_text(task),
-            reply_markup=single_task_keyboard(task_id)
-        )
-
-        return
-PROJECT_OPTIONS = [
-    "🏗 چوب",
-    "💰 مالی",
-    "🚚 حمل‌ونقل",
-    "📄 قرارداد",
-    "📞 مشتری",
-    "📦 سفارش",
-    "🧩 عمومی"
-]
-
-
-TAG_OPTIONS = [
-    "🔥 فوری",
-    "📞 تماس",
-    "💵 پرداخت",
-    "📄 سند",
-    "🚚 ارسال",
-    "🔍 پیگیری",
-    "🧠 تحلیل",
-    "🧩 عمومی"
-]
-
-
-def init_task_metadata_columns():
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    try:
-        cur.execute("""
-            ALTER TABLE tasks
-            ADD COLUMN project TEXT DEFAULT '🧩 عمومی'
-        """)
-    except:
-        pass
-
-    try:
-        cur.execute("""
-            ALTER TABLE tasks
-            ADD COLUMN tag TEXT DEFAULT '🧩 عمومی'
-        """)
-    except:
-        pass
-
-    conn.commit()
-    conn.close()
-def get_daily_report_text():
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-    """)
-    open_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM tasks
-        WHERE status='done'
-    """)
-    done_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM tasks
-        WHERE status='cancelled'
-    """)
-    cancelled_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-        AND priority LIKE '%زیاد%'
-    """)
-    high_priority_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-        AND reminder_time != 'none'
-        AND reminder_time < ?
-    """, (now_text,))
-    overdue_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM tasks
-        WHERE created_at LIKE ?
-    """, (today + "%",))
-    today_created_count = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT project, COUNT(*)
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-        GROUP BY project
-        ORDER BY COUNT(*) DESC
-    """)
-    project_rows = cur.fetchall()
-
-    cur.execute("""
-        SELECT id, title, priority, project, tag, reminder_time
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-        ORDER BY id DESC
-        LIMIT 5
-    """)
-    latest_tasks = cur.fetchall()
-
-    conn.close()
-
-    projects_text = ""
-
-    if project_rows:
-        for project, count in project_rows:
-            projects_text += f"• {project}: {count}\n"
-    else:
-        projects_text = "موردی ثبت نشده"
-
-    latest_text = ""
-
-    if latest_tasks:
-        for task in latest_tasks:
-            task_id, title, priority, project, tag, reminder_time = task
-
-            reminder = (
-                "بدون یادآوری"
-                if reminder_time == "none"
-                else reminder_time
-            )
-
-            latest_text += f"""
-#{task_id} | {priority}
-{title}
-🏗 {project} | 🏷 {tag}
-⏰ {reminder}
-"""
-    else:
-        latest_text = "کاری وجود ندارد."
-
-    return f"""
-📊 گزارش روزانه SAM
-
-📅 تاریخ:
-{today}
-
-📋 کارهای باز:
-{open_count}
-
-🔥 کارهای فوری:
-{high_priority_count}
-
-⚠️ کارهای عقب‌افتاده:
-{overdue_count}
-
-✅ کل انجام‌شده‌ها:
-{done_count}
-
-🗑 حذف‌شده‌ها:
-{cancelled_count}
-
-🆕 کارهای ثبت‌شده امروز:
-{today_created_count}
-
-🏗 وضعیت پروژه‌ها:
-{projects_text}
-
-📌 آخرین کارهای باز:
-{latest_text}
-"""
-async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text(get_daily_report_text())
-async def send_daily_report_job(
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    report = get_daily_report_text()
-
-    admin_ids = get_admin_ids()
-
-    for admin_id in admin_ids:
-
-        try:
-
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=report
-            )
-
-        except Exception as e:
-
-            print(f"Daily report send error for {admin_id}: {e}")
-
-
-def clean_json_text(text):
-
-    text = text.strip()
-
-    if text.startswith("```"):
-        text = text.replace("```json", "")
-        text = text.replace("```", "")
-        text = text.strip()
-
-    return text
-
-
-def match_option(value, options, default_value):
-
-    if not value:
-        return default_value
-
-    for option in options:
-        if value in option or option in value:
-            return option
-
-    return default_value
-
-
-async def voice_task_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not context.user_data.get("waiting_voice_task"):
-        return
-
-    await register_user(update)
-
-    user = get_user(update.effective_user.id)
-
-    if not user or user[3] != "admin":
-        await update.message.reply_text(
-            "فقط مدیر می‌تواند با ویس کار ایجاد کند."
-        )
-        context.user_data.pop("waiting_voice_task", None)
-        return
-
-    if not update.message.voice:
-        return
-
-    await update.message.reply_text(
-        "🎙 ویس دریافت شد. در حال تبدیل به متن..."
-    )
-
-    voice = update.message.voice
-
-    file = await context.bot.get_file(voice.file_id)
-
-    file_path = f"/tmp/voice_task_{update.effective_user.id}.ogg"
-
-    await file.download_to_drive(file_path)
-    with open(file_path, "rb") as audio_file:
-        transcript_response = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=audio_file
-        )
-
-    transcript = transcript_response.text
-
-    handled = await handle_voice_command(
-        update,
-        context,
-        transcript
-    )
-
-    if handled:
-        context.user_data.pop("waiting_voice_task", None)
-        return
-   
-    await update.message.reply_text(
-        f"""
-📝 متن ویس:
-
-{transcript}
-
-در حال ساخت پیش‌نویس کار...
-"""
-    )
-
-    prompt = f"""
-از متن زیر اطلاعات یک کار مدیریتی را استخراج کن.
-
-فقط JSON بده. هیچ توضیح اضافه نده.
-
-فرمت خروجی:
-{{
-  "title": "عنوان کار",
-  "member_name": "نام مسئول اگر گفته شده",
-  "priority": "🔴 زیاد یا 🟡 متوسط یا 🟢 کم",
-  "project": "یکی از این‌ها: {PROJECT_OPTIONS}",
-  "tag": "یکی از این‌ها: {TAG_OPTIONS}",
-  "reminder_time": "none",
-  "reminder_text": "بدون یادآوری"
-}}
-
-قوانین:
-- اگر اولویت بالا/فوری/مهم بود، priority را "🔴 زیاد" بگذار.
-- اگر اولویت مشخص نبود، "🟡 متوسط" بگذار.
-- اگر پروژه مشخص نبود، "🧩 عمومی" بگذار.
-- اگر دسته‌بندی مشخص نبود، "🔍 پیگیری" بگذار.
-- اگر زمان یادآوری دقیق گفته نشده، reminder_time را "none" بگذار.
-- اگر یادآوری گفته نشده، reminder_text را "بدون یادآوری" بگذار.
-
-متن ویس:
-{transcript}
-"""
-
-    try:
-
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "تو دستیار مدیریت کار هستی و فقط JSON معتبر برمی‌گردانی."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
-
-        raw_answer = response.choices[0].message.content
-
-        data = json.loads(
-            clean_json_text(raw_answer)
-        )
-
-    except Exception as e:
-
-        await update.message.reply_text(
-            f"❌ خطا در استخراج اطلاعات کار:\n{e}"
-        )
-        context.user_data.pop("waiting_voice_task", None)
-        return
-
-    draft = get_task_draft(update.effective_user.id)
-
-    draft["title"] = data.get("title", transcript)
-
-    member_name = data.get("member_name", "")
-
-    assigned_to = None
-
-    if member_name:
-        assigned_to = get_member_id_by_name(member_name)
-
-    if assigned_to:
-        draft["assigned_to"] = assigned_to
-        draft["member_name"] = member_name
-    else:
-        draft["assigned_to"] = None
-        draft["member_name"] = ""
-
-    draft["priority"] = data.get(
-        "priority",
-        "🟡 متوسط"
-    )
-
-    draft["project"] = match_option(
-        data.get("project", ""),
-        PROJECT_OPTIONS,
-        "🧩 عمومی"
-    )
-
-    draft["tag"] = match_option(
-        data.get("tag", ""),
-        TAG_OPTIONS,
-        "🔍 پیگیری"
-    )
-
-    draft["reminder_time"] = data.get(
-        "reminder_time",
-        "none"
-    )
-
-    draft["reminder_text"] = data.get(
-        "reminder_text",
-        "بدون یادآوری"
-    )
-
-    msg = await update.message.reply_text(
-        task_panel_text(draft),
-        reply_markup=task_panel_keyboard()
-    )
-
-    draft["panel_chat_id"] = msg.chat_id
-    draft["panel_message_id"] = msg.message_id
-
-    context.user_data.pop("waiting_voice_task", None)
-
-def fa_to_en_digits(text):
-
-    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
-    ar_digits = "٠١٢٣٤٥٦٧٨٩"
-    en_digits = "0123456789"
-
+def fa_to_en_digits(text: str) -> str:
+    text = text or ""
+    fa = "Û°Û±Û²Û³Û´ÛµÛ¶Û·Û¸Û¹"
+    ar = "Ù Ù¡Ù¢Ù£Ù¤Ù¥Ù¦Ù§Ù¨Ù©"
+    en = "0123456789"
     for i in range(10):
-        text = text.replace(fa_digits[i], en_digits[i])
-        text = text.replace(ar_digits[i], en_digits[i])
-
+        text = text.replace(fa[i], en[i]).replace(ar[i], en[i])
     return text
 
 
-def extract_task_id_from_text(text):
-
-    text = fa_to_en_digits(text)
-
-    import re
-
-    match = re.search(r"\d+", text)
-
-    if match:
-        return int(match.group())
-
-    word_numbers = {
-        "یک": 1,
-        "دو": 2,
-        "سه": 3,
-        "چهار": 4,
-        "پنج": 5,
-        "شش": 6,
-        "هفت": 7,
-        "هشت": 8,
-        "نه": 9,
-        "ده": 10,
-        "یازده": 11,
-        "دوازده": 12,
-        "سیزده": 13,
-        "چهارده": 14,
-        "پانزده": 15,
-        "شانزده": 16,
-        "هفده": 17,
-        "هجده": 18,
-        "نوزده": 19,
-        "بیست": 20
-    }
-
-    for word, number in word_numbers.items():
-        if word in text:
-            return number
-
-    return None
-
-
-def get_voice_tasks_text(mode):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    tomorrow = (
-        datetime.now() + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-
-    if mode == "today":
-
-        cur.execute("""
-            SELECT id, title, priority, status, project, tag, reminder_time
-            FROM tasks
-            WHERE status NOT IN ('done', 'cancelled')
-            AND (
-                created_at LIKE ?
-                OR reminder_time LIKE ?
-            )
-            ORDER BY id DESC
-            LIMIT 20
-        """, (
-            today + "%",
-            today + "%"
-        ))
-
-        title = "📅 کارهای امروز"
-
-    elif mode == "tomorrow":
-
-        cur.execute("""
-            SELECT id, title, priority, status, project, tag, reminder_time
-            FROM tasks
-            WHERE status NOT IN ('done', 'cancelled')
-            AND reminder_time LIKE ?
-            ORDER BY id DESC
-            LIMIT 20
-        """, (
-            tomorrow + "%",
-        ))
-
-        title = "📅 کارهای فردا"
-
-    else:
-
-        cur.execute("""
-            SELECT id, title, priority, status, project, tag, reminder_time
-            FROM tasks
-            WHERE status NOT IN ('done', 'cancelled')
-            ORDER BY id DESC
-            LIMIT 20
-        """)
-
-        title = "📋 کارهای مانده / باز"
-
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        return f"{title}\n\nکاری پیدا نشد."
-
-    text = f"{title}\n\n"
-
-    for row in rows:
-
-        task_id, task_title, priority, status, project, tag, reminder_time = row
-
-        status_fa = STATUS_TEXT.get(status, status)
-
-        reminder = (
-            "بدون یادآوری"
-            if reminder_time == "none"
-            else reminder_time
-        )
-
-        text += f"""
-🆔 #{task_id}
-📝 {task_title}
-🔥 {priority}
-📍 {status_fa}
-🏗 {project}
-🏷 {tag}
-⏰ {reminder}
-
-"""
-
-    return text
-
-
-def cancel_task_by_voice(task_id):
-
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT title
-        FROM tasks
-        WHERE id=?
-    """, (task_id,))
-
-    row = cur.fetchone()
-
-    if not row:
-        conn.close()
-        return None
-
-    title = row[0]
-
-    cur.execute("""
-        UPDATE tasks
-        SET status='cancelled'
-        WHERE id=?
-    """, (task_id,))
-
-    conn.commit()
-    conn.close()
-
-    return title
-
-
-async def handle_voice_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    transcript
-):
-
-    text = transcript.strip()
-
-    if "پاک کن" in text or "حذف کن" in text:
-
-        task_id = extract_task_id_from_text(text)
-
-        if not task_id:
-            await update.message.reply_text(
-                "❌ شماره کار را متوجه نشدم. مثلا بگو: کار شماره ۱۲ را پاک کن."
-            )
-            return True
-
-        title = cancel_task_by_voice(task_id)
-
-        if not title:
-            await update.message.reply_text(
-                f"❌ کار شماره {task_id} پیدا نشد."
-            )
-            return True
-
-        await update.message.reply_text(
-            f"""
-🗑 کار از لیست حذف شد
-
-🆔 شماره:
-{task_id}
-
-📝 عنوان:
-{title}
-"""
-        )
-
-        return True
-
-    if "امروز" in text:
-
-        await update.message.reply_text(
-            get_voice_tasks_text("today")
-        )
-
-        return True
-
-    if "فردا" in text:
-
-        await update.message.reply_text(
-            get_voice_tasks_text("tomorrow")
-        )
-
-        return True
-
-    remaining_words = [
-        "مانده",
-        "باقی",
-        "باز",
-        "انجام نشده"
-    ]
-
-    if any(word in text for word in remaining_words):
-
-        await update.message.reply_text(
-            get_voice_tasks_text("remaining")
-        )
-
-        return True
-
-    list_words = [
-        "لیست کار",
-        "کارها",
-        "کارا",
-        "کارارو",
-        "کارها رو",
-        "کارها را",
-        "امور",
-        "عمر",
-        "بفرست",
-        "نمایش بده",
-        "نشان بده"
-    ]
-
-    if any(word in text for word in list_words):
-
-        await update.message.reply_text(
-            get_voice_tasks_text("remaining")
-        )
-
-        return True
-
-    return False
-async def chatid_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        f"""
-🆔 Chat ID:
-
-{update.effective_chat.id}
-
-نوع چت:
-{update.effective_chat.type}
-"""
-    )
-async def chatid_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        f"""
-🆔 Chat ID:
-
-{update.effective_chat.id}
-
-نوع چت:
-{update.effective_chat.type}
-"""
-    )
-    
-
-# ===================== V5 REAL MERGE ADDON =====================
-# این بخش به آخر فایل اصلی اضافه شده و کد ۳۶۰۰ خطی قبلی را حذف نمی‌کند.
-
-V5_NOTE_WAIT = "v5_wait_note"
-V5_CHECK_WAIT = "v5_wait_check"
-
-def v5_now(): return datetime.now().strftime("%Y-%m-%d %H:%M")
-def v5_conn(): return sqlite3.connect("sam_pro.db")
-
-def v5_col(cur, table, col):
-    cur.execute(f"PRAGMA table_info({table})")
-    return any(r[1] == col for r in cur.fetchall())
-
-def v5_add_col(cur, table, col, definition):
-    if not v5_col(cur, table, col):
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
-
-def v5_init_db():
-    conn=v5_conn(); cur=conn.cursor()
-    v5_add_col(cur,"tasks","description","TEXT DEFAULT ''")
-    v5_add_col(cur,"tasks","project","TEXT DEFAULT 'عمومی'")
-    v5_add_col(cur,"tasks","tag","TEXT DEFAULT 'عمومی'")
-    v5_add_col(cur,"tasks","reminder_repeat","TEXT DEFAULT 'none'")
-    v5_add_col(cur,"tasks","deleted","INTEGER DEFAULT 0")
-    v5_add_col(cur,"tasks","pinned","INTEGER DEFAULT 0")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, note TEXT, source TEXT, message_id INTEGER, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_history (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, action TEXT, old_value TEXT, new_value TEXT, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_checklist (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, item_text TEXT, is_done INTEGER DEFAULT 0, created_by INTEGER, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, file_id TEXT, file_type TEXT, caption TEXT, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_message_links (chat_id INTEGER, message_id INTEGER, task_id INTEGER, created_at TEXT, PRIMARY KEY(chat_id,message_id))")
-    cur.execute("CREATE TABLE IF NOT EXISTS v5_ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, suggestion_type TEXT, task_id INTEGER, title TEXT, note TEXT, new_status TEXT, priority TEXT, assigned_to INTEGER, assigned_to_name TEXT, reason TEXT, confidence REAL, payload TEXT, status TEXT DEFAULT 'pending', created_at TEXT, decided_by INTEGER, decided_at TEXT)")
-    conn.commit(); conn.close()
-
-def v5_task(task_id):
-    conn=v5_conn(); cur=conn.cursor()
-    cur.execute("SELECT id,title,assigned_to,assigned_by,status,priority,reminder_time,created_at,completed_at,description,project,tag,reminder_repeat,deleted,pinned FROM tasks WHERE id=?",(task_id,))
-    r=cur.fetchone(); conn.close()
-    if not r: return None
-    k=["id","title","assigned_to","assigned_by","status","priority","reminder_time","created_at","completed_at","description","project","tag","reminder_repeat","deleted","pinned"]
-    return dict(zip(k,r))
-
-def v5_tasks(open_only=False, limit=50):
-    conn=v5_conn(); cur=conn.cursor(); where="COALESCE(deleted,0)=0"
-    if open_only: where += " AND status NOT IN ('done','cancelled')"
-    cur.execute(f"SELECT id,title,assigned_to,assigned_by,status,priority,reminder_time,created_at,completed_at,description,project,tag,reminder_repeat,deleted,pinned FROM tasks WHERE {where} ORDER BY COALESCE(pinned,0) DESC, id DESC LIMIT ?",(limit,))
-    rows=cur.fetchall(); conn.close()
-    k=["id","title","assigned_to","assigned_by","status","priority","reminder_time","created_at","completed_at","description","project","tag","reminder_repeat","deleted","pinned"]
-    return [dict(zip(k,r)) for r in rows]
-
-def v5_update(task_id, field, value):
-    if field not in {"status","priority","reminder_time","completed_at","description","project","tag","reminder_repeat","deleted","pinned","assigned_to","title"}: return
-    conn=v5_conn(); cur=conn.cursor(); cur.execute(f"UPDATE tasks SET {field}=? WHERE id=?",(value,task_id)); conn.commit(); conn.close()
-
-def v5_history(task_id,user_id,full_name,action,old='',new=''):
-    conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT INTO task_history (task_id,user_id,full_name,action,old_value,new_value,created_at) VALUES (?,?,?,?,?,?,?)",(task_id,user_id,full_name,action,str(old),str(new),v5_now())); conn.commit(); conn.close()
-
-def v5_note(task_id,user_id,full_name,note,source='manual',message_id=None):
-    conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT INTO task_notes (task_id,user_id,full_name,note,source,message_id,created_at) VALUES (?,?,?,?,?,?,?)",(task_id,user_id,full_name,note,source,message_id,v5_now())); conn.commit(); conn.close()
-
-def v5_notes(task_id,limit=20):
-    conn=v5_conn(); cur=conn.cursor(); cur.execute("SELECT created_at,full_name,note,source FROM task_notes WHERE task_id=? ORDER BY id DESC LIMIT ?",(task_id,limit)); rows=cur.fetchall(); conn.close(); return rows
-
-def v5_histories(task_id,limit=30):
-    conn=v5_conn(); cur=conn.cursor(); cur.execute("SELECT created_at,full_name,action,old_value,new_value FROM task_history WHERE task_id=? ORDER BY id DESC LIMIT ?",(task_id,limit)); rows=cur.fetchall(); conn.close(); return rows
-
-def v5_link(chat_id,message_id,task_id):
-    conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT OR REPLACE INTO task_message_links (chat_id,message_id,task_id,created_at) VALUES (?,?,?,?)",(chat_id,message_id,task_id,v5_now())); conn.commit(); conn.close()
-
-def v5_task_by_msg(chat_id,message_id):
-    conn=v5_conn(); cur=conn.cursor(); cur.execute("SELECT task_id FROM task_message_links WHERE chat_id=? AND message_id=?",(chat_id,message_id)); r=cur.fetchone(); conn.close(); return r[0] if r else None
-
-def v5_status_from_text(t):
-    if any(w in t for w in ["انجام شد","انجام دادم","فرستادم","تمام شد","حل شد"]): return "done"
-    if any(w in t for w in ["منتظر","جواب","خبر بده","پاسخ"]): return "waiting"
-    if any(w in t for w in ["پیگیری","در حال","شروع کردم"]): return "in_progress"
-    if any(w in t for w in ["لغو","حذف","کنسل"]): return "cancelled"
-    return None
-
-def v5_priority(t):
-    if any(w in t for w in ["فوری","ضروری","مهم","بالا","زیاد"]): return "🔴 زیاد"
-    if any(w in t for w in ["کم","بعدا","پایین"]): return "🟢 کم"
-    return "🟡 متوسط"
-
-def v5_member_name(user_id):
-    u=get_user(user_id) if user_id else None
-    return (u[2] if u and len(u)>2 and u[2] else str(user_id or "نامشخص"))
-
-def v5_task_text(t):
-    st=STATUS_TEXT.get(t['status'],t['status']); rem=t.get('reminder_time') or 'none'
-    rem='ندارد' if rem=='none' else rem
-    pin='📌 ' if t.get('pinned') else ''
-    return f"""📂 پرونده کار #{t['id']}
-
-{pin}📌 عنوان:
-{t['title']}
-
-👤 مسئول:
-{v5_member_name(t.get('assigned_to'))}
-
-📍 وضعیت:
-{st}
-
-🔥 اولویت:
-{t.get('priority') or '🟡 متوسط'}
-
-🏗 پروژه: {t.get('project') or 'عمومی'}
-🏷 دسته: {t.get('tag') or 'عمومی'}
-⏰ یادآوری: {rem}
-
-📝 توضیح:
-{t.get('description') or '-'}"""
-
-def v5_keyboard(task_id):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ انجام شد",callback_data=f"v5:status:{task_id}:done"), InlineKeyboardButton("🔄 پیگیری",callback_data=f"v5:status:{task_id}:in_progress")],
-        [InlineKeyboardButton("⏳ منتظر",callback_data=f"v5:status:{task_id}:waiting"), InlineKeyboardButton("⛔ لغو",callback_data=f"v5:status:{task_id}:cancelled")],
-        [InlineKeyboardButton("📝 شرح‌ها",callback_data=f"v5:notes:{task_id}"), InlineKeyboardButton("➕ شرح",callback_data=f"v5:addnote:{task_id}")],
-        [InlineKeyboardButton("☑️ چک‌لیست",callback_data=f"v5:check:{task_id}"), InlineKeyboardButton("➕ چک‌لیست",callback_data=f"v5:addcheck:{task_id}")],
-        [InlineKeyboardButton("📎 فایل‌ها",callback_data=f"v5:files:{task_id}"), InlineKeyboardButton("🧾 تاریخچه",callback_data=f"v5:history:{task_id}")],
-        [InlineKeyboardButton("📌 پین",callback_data=f"v5:pin:{task_id}"), InlineKeyboardButton("🗑 حذف",callback_data=f"v5:delete:{task_id}")]
-    ])
-
-async def v5_send_card(context,chat_id,task_id):
-    t=v5_task(task_id)
-    if not t: return
-    msg=await context.bot.send_message(chat_id=chat_id,text=v5_task_text(t),reply_markup=v5_keyboard(task_id),parse_mode="HTML")
-    v5_link(chat_id,msg.message_id,task_id)
-
-async def v5_add_note_reply(update,task_id,note,source='manual'):
-    t=v5_task(task_id)
-    if not t:
-        await update.message.reply_text("❌ کار پیدا نشد."); return
-    v5_note(task_id,update.effective_user.id,update.effective_user.full_name,note,source,update.message.message_id)
-    v5_history(task_id,update.effective_user.id,update.effective_user.full_name,"add_note","",note)
-    status=v5_status_from_text(note)
-    if status:
-        old=t['status']; v5_update(task_id,'status',status)
-        if status=='done': v5_update(task_id,'completed_at',v5_now())
-        v5_history(task_id,update.effective_user.id,update.effective_user.full_name,"auto_status",old,status)
-        await update.message.reply_text(f"📝 شرح ثبت شد و وضعیت کار #{task_id} به {STATUS_TEXT.get(status,status)} تغییر کرد.")
-    else:
-        await update.message.reply_text(f"📝 شرح برای کار #{task_id} ثبت شد.")
-
-async def v5_create_from_text(update,context,raw):
-    assigned=update.effective_user.id; name=update.effective_user.full_name
-    for u in get_users():
-        uid, username, full_name, role = u[:4]
-        if (full_name and full_name.split()[0] in raw) or (username and '@'+username in raw):
-            assigned=uid; name=full_name; break
-    title=re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید)\s*[:：\-]?\s*",'',raw).strip()[:180]
-    conn=v5_conn(); cur=conn.cursor()
-    cur.execute("INSERT INTO tasks (title,assigned_to,assigned_by,priority,reminder_time,created_at,description) VALUES (?,?,?,?,?,?,?)",(title,assigned,update.effective_user.id,v5_priority(raw),'none',v5_now(),f"ثبت از پیام: {raw}"))
-    task_id=cur.lastrowid; conn.commit(); conn.close()
-    v5_history(task_id,update.effective_user.id,update.effective_user.full_name,'create','',title)
-    v5_note(task_id,update.effective_user.id,update.effective_user.full_name,f"متن اولیه: {raw}",'auto_create',update.message.message_id)
-    await update.message.reply_text(f"✅ کار جدید ثبت شد\n\n🆔 #{task_id}\n📌 {title}\n👤 مسئول: {name}")
-    await v5_send_card(context,update.effective_chat.id,task_id)
-
-async def v5_tasks_cmd(update,context):
-    await register_user(update)
-    tasks=v5_tasks(False,30)
-    if not tasks: await update.message.reply_text("📋 کاری ثبت نشده."); return
-    await update.message.reply_text("📋 لیست کارها")
-    for t in tasks[:12]: await v5_send_card(context,update.effective_chat.id,t['id'])
-
-async def v5_help_cmd(update,context):
-    await update.message.reply_text("""❓ راهنمای V5 Real Merge
-
-کار جدید: رضا فردا قیمت چوب روسیه را پیگیری کند
-کار 12: مشتری گفت فردا خبر می‌دهد
-کار 12 انجام شد
-/smart
-/summary
-/export_excel
-/export_pdf""", reply_markup=ReplyKeyboardMarkup([["➕ کار جدید","📋 کارها"],["🧠 تحلیل چت","🧠 مدیر هوشمند"],["🎙 فرمان صوتی","🤖 دستیار هوشمند"],["📊 گزارش‌ها","❓ راهنما"],["👥 اعضا","👤 پروفایل"],["⏱ پیگیری"]],resize_keyboard=True))
-
-async def v5_callback(update,context):
-    q=update.callback_query; await q.answer(); parts=q.data.split(':')
-    if parts[0]!='v5': return
-    action=parts[1]; task_id=int(parts[2]); t=v5_task(task_id)
-    if not t: await q.message.reply_text("❌ کار پیدا نشد."); raise ApplicationHandlerStop
-    if action=='status':
-        new=parts[3]; old=t['status']; v5_update(task_id,'status',new)
-        if new=='done': v5_update(task_id,'completed_at',v5_now())
-        v5_history(task_id,q.from_user.id,q.from_user.full_name,'status',old,new)
-        v5_note(task_id,q.from_user.id,q.from_user.full_name,f"وضعیت تغییر کرد: {STATUS_TEXT.get(old,old)} → {STATUS_TEXT.get(new,new)}",'button')
-        await q.edit_message_text(v5_task_text(v5_task(task_id)),reply_markup=v5_keyboard(task_id),parse_mode='HTML')
-    elif action=='notes':
-        rows=v5_notes(task_id,30); text=f"📝 شرح‌های کار #{task_id}\n\n"+("شرحی ثبت نشده." if not rows else "\n\n".join(f"{r[0]} | {r[1]}:\n{r[2]}" for r in rows))
-        await q.message.reply_text(text)
-    elif action=='addnote':
-        context.user_data[V5_NOTE_WAIT]=task_id; await q.message.reply_text(f"📝 شرح جدید برای کار #{task_id} را بنویس:")
-    elif action=='history':
-        rows=v5_histories(task_id,30); text=f"🧾 تاریخچه کار #{task_id}\n\n"+("تاریخچه‌ای ثبت نشده." if not rows else "\n".join(f"{r[0]} | {r[1]} | {r[2]}: {r[3]} → {r[4]}" for r in rows))
-        await q.message.reply_text(text)
-    elif action=='pin':
-        v5_update(task_id,'pinned',0 if t.get('pinned') else 1); await q.edit_message_text(v5_task_text(v5_task(task_id)),reply_markup=v5_keyboard(task_id),parse_mode='HTML')
-    elif action=='delete':
-        v5_update(task_id,'deleted',1); v5_update(task_id,'status','cancelled'); v5_history(task_id,q.from_user.id,q.from_user.full_name,'delete','','deleted'); await q.edit_message_text(f"🗑 کار #{task_id} حذف/لغو شد.")
-    else:
-        await q.message.reply_text("این گزینه در نسخه بعدی تکمیل می‌شود.")
-    raise ApplicationHandlerStop
-
-async def v5_text(update,context):
-    if not update.message or not update.message.text: return
-    await register_user(update); text=update.message.text.strip()
-    if context.user_data.get(V5_NOTE_WAIT):
-        tid=context.user_data.pop(V5_NOTE_WAIT); await v5_add_note_reply(update,tid,text,'button'); raise ApplicationHandlerStop
-    if text in ['🧠 مدیر هوشمند','مدیر هوشمند']:
-        await v5_smart_cmd(update,context); raise ApplicationHandlerStop
-    if text in ['❓ راهنما','راهنما']:
-        await v5_help_cmd(update,context); raise ApplicationHandlerStop
-    if text in ['📋 کارها','لیست کارها']:
-        await v5_tasks_cmd(update,context); raise ApplicationHandlerStop
-    if text in ['📊 گزارش‌ها','گزارش‌ها']:
-        await update.message.reply_text('📊 گزارش‌ها',reply_markup=ReplyKeyboardMarkup([["📊 آمار","📅 گزارش روزانه"],["📤 خروجی اکسل","📄 خروجی PDF"],["⬅️بازگشت"]],resize_keyboard=True)); raise ApplicationHandlerStop
-    if text=='📤 خروجی اکسل': await v5_export_excel_cmd(update,context); raise ApplicationHandlerStop
-    if text=='📄 خروجی PDF': await v5_export_pdf_cmd(update,context); raise ApplicationHandlerStop
-    rid=update.message.reply_to_message.message_id if update.message.reply_to_message else None
-    if rid:
-        tid=v5_task_by_msg(update.effective_chat.id,rid)
-        if tid: await v5_add_note_reply(update,tid,text,'reply'); raise ApplicationHandlerStop
-    m=re.search(r"کار\s*([0-9۰-۹٠-٩]+)\s*[:：\-]\s*(.+)",text)
-    if m: await v5_add_note_reply(update,int(fa_to_en_digits(m.group(1))),m.group(2).strip(),'group_pattern'); raise ApplicationHandlerStop
-    m=re.search(r"کار\s*([0-9۰-۹٠-٩]+).*(انجام|تمام|لغو|منتظر|پیگیری|در حال)",text)
+def clean_command_arg_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    if context.args:
+        return " ".join(context.args).strip()
+    if update.message and update.message.text:
+        parts = update.message.text.split(maxsplit=1)
+        return parts[1].strip() if len(parts) > 1 else ""
+    return ""
+
+
+def extract_task_id(text: str) -> Optional[int]:
+    text = fa_to_en_digits(normalize_text(text))
+    # Prefer explicit task indicators, so random numbers do not trigger task actions.
+    m = re.search(r"(?:Ú©Ø§Ø±|task|#)\s*(\d+)", text, flags=re.I)
     if m:
-        tid=int(fa_to_en_digits(m.group(1))); st=v5_status_from_text(text) or 'in_progress'
-        fake=type('X',(),{})(); await v5_set_status_from_text(update,context,tid,st); raise ApplicationHandlerStop
-    if text.startswith(('کار جدید','تسک جدید','وظیفه جدید')):
-        raw=re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید)\s*[:：\-]?\s*",'',text).strip(); await v5_create_from_text(update,context,raw); raise ApplicationHandlerStop
-
-async def v5_set_status_from_text(update,context,task_id,status):
-    t=v5_task(task_id)
-    if not t: await update.message.reply_text('❌ کار پیدا نشد.'); return
-    old=t['status']; v5_update(task_id,'status',status)
-    if status=='done': v5_update(task_id,'completed_at',v5_now())
-    v5_history(task_id,update.effective_user.id,update.effective_user.full_name,'status_text',old,status)
-    await update.message.reply_text(f"✅ وضعیت کار #{task_id} شد: {STATUS_TEXT.get(status,status)}")
-
-async def v5_file(update,context):
-    if not update.message: return
-    rid=update.message.reply_to_message.message_id if update.message.reply_to_message else None
-    if not rid: return
-    tid=v5_task_by_msg(update.effective_chat.id,rid)
-    if not tid: return
-    file_id=file_type=None
-    if update.message.document: file_id=update.message.document.file_id; file_type='document'
-    elif update.message.photo: file_id=update.message.photo[-1].file_id; file_type='photo'
-    elif update.message.video: file_id=update.message.video.file_id; file_type='video'
-    elif update.message.audio: file_id=update.message.audio.file_id; file_type='audio'
-    if file_id:
-        conn=v5_conn(); cur=conn.cursor(); cur.execute("INSERT INTO task_files (task_id,user_id,full_name,file_id,file_type,caption,created_at) VALUES (?,?,?,?,?,?,?)",(tid,update.effective_user.id,update.effective_user.full_name,file_id,file_type,update.message.caption or '',v5_now())); conn.commit(); conn.close()
-        v5_history(tid,update.effective_user.id,update.effective_user.full_name,'add_file','',file_type); await update.message.reply_text(f"📎 فایل داخل پرونده کار #{tid} ذخیره شد."); raise ApplicationHandlerStop
-
-async def v5_export_excel_cmd(update,context):
-    try:
-        import openpyxl
-        wb=openpyxl.Workbook(); ws=wb.active; ws.append(['ID','Title','Status','Priority','Project','Tag','Reminder','Created'])
-        for t in v5_tasks(False,10000): ws.append([t['id'],t['title'],STATUS_TEXT.get(t['status'],t['status']),t['priority'],t['project'],t['tag'],t['reminder_time'],t['created_at']])
-        path=tempfile.mktemp(suffix='.xlsx'); wb.save(path); await update.message.reply_document(document=open(path,'rb'),filename='sam_tasks_report.xlsx')
-    except Exception as e: await update.message.reply_text(f"خطای خروجی اکسل: {e}")
-
-async def v5_export_pdf_cmd(update,context):
-    path=tempfile.mktemp(suffix='.txt')
-    with open(path,'w',encoding='utf-8') as f:
-        f.write('SAM PRO Team Manager Report\n\n')
-        for t in v5_tasks(False,500): f.write(f"#{t['id']} | {t['status']} | {t['priority']} | {t['title']}\n")
-    await update.message.reply_document(document=open(path,'rb'),filename='sam_tasks_report.txt')
-
-async def v5_smart_cmd(update,context):
-    if not client:
-        await update.message.reply_text('OPENAI_API_KEY تنظیم نشده.'); return
-    await update.message.reply_text('🧠 مدیر هوشمند در حال بررسی چت و کارهای باز است...')
-    # از تحلیل قبلی موجود در فایل اصلی هم استفاده می‌کنیم تا چیزی حذف نشود
-    try:
-        await silent_ai_analyze(update, context)
-    except Exception as e:
-        await update.message.reply_text(f'تحلیل هوشمند ساده اجرا شد، ولی خطای بخش قدیمی: {e}')
+        return int(m.group(1))
+    if re.fullmatch(r"\d+", text.strip()):
+        return int(text.strip())
+    return None
 
 
-
-# =================== V5.2 COMMAND + STUCK STATE FIX ===================
-
-def v52_clear_waiting_states(context):
-    """پاک کردن حالت‌های نیمه‌کاره تا هر پیام معمولی به خطای زمان تبدیل نشود."""
-    for key in [
-        "waiting_custom_reminder",
-        "task_draft_waiting",
-        "waiting_note_task_id",
-        "waiting_check_task_id",
-        V5_NOTE_WAIT,
-    ]:
-        try:
-            context.user_data.pop(key, None)
-        except Exception:
-            pass
+def detect_project(text: str) -> str:
+    text = normalize_text(text)
+    table = {
+        "ØªØ®ØªÙ": ["ØªØ®ØªÙ", "ÚÙØ¨", "Ø±ÙØ³ÛÙ", "Ø§ÙÙØ§Ø±", "MDF", "mdf", "ÙØ¬Ø§Ø±Û"],
+        "ÙÛÙÙ": ["ÙÛÙÙ", "Ø³ÛØ¨", "Ù¾Ø±ØªÙØ§Ù", "ÙØ§Ø±ÙÚ¯Û", "ÙÚ©ØªØ§Ø±ÛÙ", "Ú©Ø§ÙÙ", "Ø³Ø¨Ø²Û", "ØµØ§Ø¯Ø±Ø§Øª ÙÛÙÙ"],
+        "Ù¾ØªØ±ÙØ´ÛÙÛ": ["Ù¾ØªØ±ÙØ´ÛÙÛ", "Ø´ÛÙÛ", "ÙÙØ§Ø¯", "sibur", "SIBUR", "Ù¾ÙÛÙØ±", "ÙØ§Ø³ØªÛÚ©", "Ú¯Ø§Ø²"],
+        "ÙØ§ÙÛ": ["ÙØ§ÙÛ", "Ù¾ÙÙ", "Ù¾Ø±Ø¯Ø§Ø®Øª", "Ø­Ø³Ø§Ø¨", "Ø¨Ø§ÙÚ©", "ÙØ§Ú©ØªÙØ±", "invoice", "ÙØ§Ø±ÛØ²", "Ø¯ÙØ§Ø±", "Ø±ÙØ¨Ù"],
+        "ØºÙØ§Øª": ["ØºÙØ§Øª", "Ú¯ÙØ¯Ù", "Ø¬Ù", "Ø°Ø±Øª", "ÙÙØ§Ø¯Ù", "Ú©ÙØ¬Ø§ÙÙ", "Ø­Ø¨ÙØ¨Ø§Øª", "ÙØ®ÙØ¯"],
+    }
+    for project, keywords in table.items():
+        if any(k.lower() in text.lower() for k in keywords):
+            return project
+    return "ØºÛØ±Ù"
 
 
-def v52_parse_reminder_text(raw: str):
-    raw = (raw or "").strip()
-    raw_l = raw.lower()
+def detect_priority(text: str) -> str:
+    text = normalize_text(text)
+    if any(w in text for w in ["ÙÙØ±Û", "Ø¶Ø±ÙØ±Û", "Ø§ÙØ±ÚØ§ÙØ³Û", "Ø®ÛÙÛ ÙÙÙ", "ð¥", "ÙØ±ÙØ²"]):
+        return "ÙÙØ±Û"
+    if any(w in text for w in ["ÙÙÙ", "Ø¨Ø§ÙØ§", "Ø²ÛØ§Ø¯", "Ø§ÙÙÙÛØª Ø¨Ø§ÙØ§", "ð´"]):
+        return "Ø²ÛØ§Ø¯"
+    if any(w in text for w in ["Ú©Ù", "Ù¾Ø§ÛÛÙ", "Ø¨Ø¹Ø¯Ø§", "Ø¨Ø¹Ø¯Ø§Ù", "Ø³Ø¨Ø²"]):
+        return "Ú©Ù"
+    return "ÙØªÙØ³Ø·"
+
+
+def detect_status_from_text(text: str) -> Optional[str]:
+    text = normalize_text(text)
+    if any(w in text for w in ["Ø§ÙØ¬Ø§Ù Ø´Ø¯", "Ø§ÙØ¬Ø§Ù Ø¯Ø§Ø¯Ù", "ÙØ±Ø³ØªØ§Ø¯Ù", "Ø§Ø±Ø³Ø§Ù Ø´Ø¯", "ØªÙØ§Ù Ø´Ø¯", "Ø­Ù Ø´Ø¯", "Ø§ÙÚ©Û Ø´Ø¯", "ØªÚ©ÙÛÙ Ø´Ø¯"]):
+        return "done"
+    if any(w in text for w in ["Ø¬ÙØ§Ø¨ ÙØ¯Ø§Ø¯", "Ø²ÙÚ¯ Ø²Ø¯Ù Ø¬ÙØ§Ø¨ ÙØ¯Ø§Ø¯", "ÙÙØªØ¸Ø±", "ÙÙØªØ¸Ø± Ù¾Ø§Ø³Ø®", "Ø®Ø¨Ø± Ø¨Ø¯Ù", "Ù¾Ø§Ø³Ø® Ø¨Ø¯Ù", "Ø¨Ø¹Ø¯Ø§ Ø¬ÙØ§Ø¨", "Ø¨Ø¹Ø¯Ø§Ù Ø¬ÙØ§Ø¨"]):
+        return "waiting"
+    if any(w in text for w in ["Ù¾ÛÚ¯ÛØ±Û", "Ø¯Ø± Ø­Ø§Ù", "Ø´Ø±ÙØ¹ Ú©Ø±Ø¯Ù", "Ø¯Ø§Ø±Ù Ø§ÙØ¬Ø§Ù", "Ø¯Ø± Ø¯Ø³Øª Ø§ÙØ¯Ø§Ù"]):
+        return "in_progress"
+    if any(w in text for w in ["ÙØºÙ", "Ú©ÙØ³Ù", "Ø­Ø°Ù", "Ø¨ÛØ®ÛØ§Ù"]):
+        return "cancelled"
+    return None
+
+
+def parse_datetime_text(text: str) -> Tuple[Optional[str], str]:
+    """Return (YYYY-MM-DD HH:MM, repeat). None means no valid datetime."""
+    raw = normalize_text(fa_to_en_digits(text))
+    if not raw or any(w in raw.lower() for w in ["none", "Ø¨Ø¯ÙÙ", "ÙØ¯Ø§Ø±Ø¯"]):
+        return "none", "none"
+
+    repeat = "none"
+    if any(w in raw.lower() for w in ["daily", "ÙØ± Ø±ÙØ²", "Ø±ÙØ²Ø§ÙÙ"]):
+        repeat = "daily"
+    elif any(w in raw.lower() for w in ["weekly", "ÙØ± ÙÙØªÙ", "ÙÙØªÚ¯Û"]):
+        repeat = "weekly"
+
+    cleaned = raw
+    for w in ["daily", "weekly", "ÙØ± Ø±ÙØ²", "Ø±ÙØ²Ø§ÙÙ", "ÙØ± ÙÙØªÙ", "ÙÙØªÚ¯Û"]:
+        cleaned = cleaned.replace(w, "")
+    cleaned = cleaned.strip()
     now = datetime.now()
 
-    if raw_l in ["none", "no", "off", "disable"] or raw in ["بدون", "بدون یادآوری", "حذف", "خاموش"]:
-        return "none"
-
-    m = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2})[:.](\d{2})", fa_to_en_digits(raw))
-    if m:
-        y, mo, d, h, mi = map(int, m.groups())
-        return datetime(y, mo, d, h, mi).strftime("%Y-%m-%d %H:%M")
-
-    hm = re.search(r"(\d{1,2})[:.](\d{2})", fa_to_en_digits(raw))
-    if "فردا" in raw:
-        base = now + timedelta(days=1)
-        if hm:
-            return base.replace(hour=int(hm.group(1)), minute=int(hm.group(2)), second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
-        return base.replace(hour=10, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
-    if "امروز" in raw:
-        if hm:
-            return now.replace(hour=int(hm.group(1)), minute=int(hm.group(2)), second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
-        return now.strftime("%Y-%m-%d %H:%M")
-    if "یک ساعت" in raw:
-        return (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
-    if "دو ساعت" in raw:
-        return (now + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
-    if "سه ساعت" in raw:
-        return (now + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-
-    return None
-
-
-async def v52_start_cmd(update, context):
-    v52_clear_waiting_states(context)
-    await start(update, context)
-    raise ApplicationHandlerStop
-
-
-async def v52_help_cmd(update, context):
-    v52_clear_waiting_states(context)
-    await update.message.reply_text(
-        """❓ راهنمای سریع SAM PRO
-
-📋 لیست کارها:
-/tasks
-
-✅ انجام کار:
-/done 1
-یا: کار 1 انجام شد
-
-🗑 حذف کار:
-/delete 1
-
-⏰ تنظیم یادآوری:
-/remind 1 2026-06-25 18:00
-/remind 1 فردا 10:00
-/remind 1 none
-
-🧠 تحلیل چت:
-/summary
-
-🧠 مدیر هوشمند:
-/smart
-
-📤 خروجی:
-/export_excel
-/export_pdf""",
-        reply_markup=ReplyKeyboardMarkup(
-            [["➕ کار جدید", "📋 کارها"], ["🧠 تحلیل چت", "🧠 مدیر هوشمند"], ["📊 آمار", "👥 اعضا"], ["👤 پروفایل", "❓ راهنما"]],
-            resize_keyboard=True,
-        ),
-    )
-    raise ApplicationHandlerStop
-
-
-async def v52_tasks_panel_cmd(update, context):
-    v52_clear_waiting_states(context)
-    await update.message.reply_text(
-        "📋 لیست کارهای باز:\n\nروی هر کار بزن تا منوی همان کار باز شود.",
-        reply_markup=task_list_keyboard(),
-    )
-    raise ApplicationHandlerStop
-
-
-async def v52_today_cmd(update, context):
-    v52_clear_waiting_states(context)
-    today = datetime.now().strftime("%Y-%m-%d")
-    tasks = []
-    for t in v5_tasks(False, 200):
-        if str(t.get("created_at") or "").startswith(today) or str(t.get("reminder_time") or "").startswith(today):
-            tasks.append(t)
-    if not tasks:
-        await update.message.reply_text("📅 برای امروز کاری پیدا نشد.")
-    else:
-        await update.message.reply_text("📅 کارهای امروز")
-        for t in tasks[:15]:
-            await v5_send_card(context, update.effective_chat.id, t["id"])
-    raise ApplicationHandlerStop
-
-
-async def v52_done_cmd(update, context):
-    v52_clear_waiting_states(context)
-    if not context.args:
-        await update.message.reply_text("مثال درست:\n/done 1")
-        raise ApplicationHandlerStop
-    task_id = extract_task_id(" ".join(context.args))
-    t = v5_task(task_id) if task_id else None
-    if not t:
-        await update.message.reply_text("❌ کار پیدا نشد. شماره کار را بفرست. مثال: /done 1")
-        raise ApplicationHandlerStop
-    old = t["status"]
-    v5_update(task_id, "status", "done")
-    v5_update(task_id, "completed_at", v5_now())
-    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "done_command", old, "done")
-    await update.message.reply_text(f"✅ کار #{task_id} انجام‌شده شد.")
-    raise ApplicationHandlerStop
-
-
-async def v52_delete_cmd(update, context):
-    v52_clear_waiting_states(context)
-    if not context.args:
-        await update.message.reply_text("مثال درست:\n/delete 1")
-        raise ApplicationHandlerStop
-    task_id = extract_task_id(" ".join(context.args))
-    t = v5_task(task_id) if task_id else None
-    if not t:
-        await update.message.reply_text("❌ کار پیدا نشد. شماره کار را بفرست. مثال: /delete 1")
-        raise ApplicationHandlerStop
-    v5_update(task_id, "deleted", 1)
-    v5_update(task_id, "status", "cancelled")
-    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "delete_command", "", "deleted")
-    await update.message.reply_text(f"🗑 کار #{task_id} حذف/لغو شد.")
-    raise ApplicationHandlerStop
-
-
-async def v52_remind_cmd(update, context):
-    v52_clear_waiting_states(context)
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            """⏰ برای تنظیم یادآوری اینطوری بزن:
-
-/remind 1 2026-06-25 18:00
-/remind 1 فردا 10:00
-/remind 1 امروز 22:30
-/remind 1 سه ساعت بعد
-/remind 1 none"""
-        )
-        raise ApplicationHandlerStop
-
-    task_id = extract_task_id(context.args[0])
-    t = v5_task(task_id) if task_id else None
-    if not t:
-        await update.message.reply_text("❌ کار پیدا نشد. مثال: /remind 1 2026-06-25 18:00")
-        raise ApplicationHandlerStop
-
-    raw_time = " ".join(context.args[1:])
-    reminder_time = v52_parse_reminder_text(raw_time)
-    if reminder_time is None:
-        await update.message.reply_text("❌ فرمت زمان اشتباه است. مثال درست:\n/remind 1 2026-06-25 18:00")
-        raise ApplicationHandlerStop
-
-    old = t.get("reminder_time")
-    v5_update(task_id, "reminder_time", reminder_time)
-    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "remind_command", old, reminder_time)
-    shown = "بدون یادآوری" if reminder_time == "none" else reminder_time
-    await update.message.reply_text(f"⏰ یادآوری کار #{task_id} تنظیم شد:\n{shown}")
-    raise ApplicationHandlerStop
-
-
-async def v52_followup_cmd(update, context):
-    v52_clear_waiting_states(context)
-    await update.message.reply_text(
-        "⏱ پیگیری کارهای باز:\n\nروی هر کار بزن تا منوی همان کار باز شود.",
-        reply_markup=task_list_keyboard(),
-    )
-    raise ApplicationHandlerStop
-
-
-async def v52_smart_cmd(update, context):
-    v52_clear_waiting_states(context)
-    await v5_smart_cmd(update, context)
-    raise ApplicationHandlerStop
-
-# =================== END V5.2 COMMAND + STUCK STATE FIX ===================
-
-# =================== END V5 REAL MERGE ADDON ===================
-
-init_db()
-v5_init_db()
-init_silent_ai_tables()
-init_task_metadata_columns()
-
-app = (
-    Application
-    .builder()
-    .token(TOKEN)
-    .build()
-)
-
-job_queue = app.job_queue
-
-
-
-app.add_handler(
-    CommandHandler(
-        "start",
-        start
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "chatid",
-        chatid_command
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "chatid",
-        chatid_command
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "join",
-        join_command
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "whoami",
-        whoami
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "members",
-        members
-    )
-)
-
-
-app.add_handler(
-    CommandHandler(
-        "tasks",
-        list_tasks
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "stats",
-        stats
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "dailyreport",
-     daily_report_command
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "summary",
-        summary_command
-    )
-)
-app.add_handler(
-    task_conversation
-)
-
-app.add_handler(
-    CommandHandler(
-        "done",
-        done_task
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "ai",
-        ai_command
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "exit",
-        exit_ai
-    )
-)
-
-app.add_handler(
-    CallbackQueryHandler(
-        task_status_callback,
-        pattern="^task_status:"
-    )
-)
-
-app.add_handler(
-    CallbackQueryHandler(
-        suggestion_callback,
-        pattern="^suggestion:"
-    )
-)
-
-app.add_handler(
-    CallbackQueryHandler(
-        task_draft_callback,
-        pattern="^draft:"
-    )
-)
-
-app.add_handler(
-    CallbackQueryHandler(
-        task_menu_callback,
-        pattern="^taskmenu:"
-    )
-)
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^📋 کارها$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^🤖 دستیار هوشمند$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^👥 اعضا$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^📊 آمار$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^👤 پروفایل$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^➕ کار جدید$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex(".*فرمان صوتی.*"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^⏱ پیگیری$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^🧠 تحلیل چت$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^⏱ یک ساعت اخیر$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^⏱ دو ساعت اخیر$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^📅 دیروز$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^📊 ۷ روز اخیر$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.Regex("^⬅️بازگشت$"),
-        buttons
-    )
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.VOICE,
-        voice_task_handler
-    ),
-    group=0
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        task_draft_text_input
-    ),
-    group=0
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        ai_chat
-    ),
-    group=1
-)
-
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        silent_message_watcher
-    ),
-    group=2
-)
-
-
-# V5.2 priority command handlers: these run before old handlers and stop duplicate replies
-app.add_handler(CommandHandler("start", v52_start_cmd), group=-2)
-app.add_handler(CommandHandler("help", v52_help_cmd), group=-2)
-app.add_handler(CommandHandler("tasks", v52_tasks_panel_cmd), group=-2)
-app.add_handler(CommandHandler("today", v52_today_cmd), group=-2)
-app.add_handler(CommandHandler("done", v52_done_cmd), group=-2)
-app.add_handler(CommandHandler("delete", v52_delete_cmd), group=-2)
-app.add_handler(CommandHandler("remind", v52_remind_cmd), group=-2)
-app.add_handler(CommandHandler("followup", v52_followup_cmd), group=-2)
-app.add_handler(CommandHandler("smart", v52_smart_cmd), group=-2)
-
-# V5 Real Merge handlers
-app.add_handler(CommandHandler("v5help", v5_help_cmd))
-app.add_handler(CommandHandler("smart", v5_smart_cmd))
-app.add_handler(CommandHandler("v5tasks", v5_tasks_cmd))
-app.add_handler(CommandHandler("export_excel", v5_export_excel_cmd))
-app.add_handler(CommandHandler("export_pdf", v5_export_pdf_cmd))
-app.add_handler(CallbackQueryHandler(v5_callback, pattern="^v5:"), group=-1)
-app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, v5_file), group=-1)
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v5_text), group=-1)
-
-
-
-# =================== V5.3 CLEAN GROUP + SMART FIX ===================
-# این بخش عمداً با group=-10 قبل از هندلرهای قدیمی اجرا می‌شود تا:
-# 1) گروه شلوغ نشود
-# 2) پیام‌های معمولی دیگر وارد حالت زمان/یادآوری گیر نکنند
-# 3) لیست کارها فقط به‌صورت منوی دکمه‌ای بیاید
-# 4) مدیر هوشمند واقعاً چت و کارها را با OpenAI تحلیل کند
-
-V53_PROJECTS = ["تخته", "میوه", "پتروشیمی", "مالی", "غلات", "غیره"]
-V53_STATUS_WORDS = {
-    "done": ["انجام شد", "انجام دادم", "تمام شد", "اوکی شد", "حل شد", "فرستادم", "ارسال شد", "تکمیل شد"],
-    "waiting": ["جواب نداد", "جواب ندادند", "منتظر", "خبر بده", "خبر بدهند", "پاسخ", "تماس نگرفت", "فعلا جواب"],
-    "in_progress": ["پیگیری", "در حال", "شروع", "دارم انجام", "در دست انجام"],
-    "cancelled": ["لغو", "کنسل", "حذف"]
-}
-
-
-def v53_model():
-    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-
-def v53_transcribe_model():
-    return os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
-
-
-def v53_has_openai_key():
-    return bool(os.getenv("OPENAI_API_KEY")) and client is not None
-
-
-def v53_init_db():
-    conn = v5_conn()
-    cur = conn.cursor()
-    try:
-        v5_add_col(cur, "tasks", "description", "TEXT DEFAULT ''")
-        v5_add_col(cur, "tasks", "project", "TEXT DEFAULT 'غیره'")
-        v5_add_col(cur, "tasks", "tag", "TEXT DEFAULT 'عمومی'")
-        v5_add_col(cur, "tasks", "reminder_repeat", "TEXT DEFAULT 'none'")
-        v5_add_col(cur, "tasks", "deleted", "INTEGER DEFAULT 0")
-        v5_add_col(cur, "tasks", "pinned", "INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    cur.execute("CREATE TABLE IF NOT EXISTS task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, note TEXT, source TEXT, message_id INTEGER, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_history (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, action TEXT, old_value TEXT, new_value TEXT, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, file_id TEXT, file_type TEXT, caption TEXT, created_at TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS task_message_links (chat_id INTEGER, message_id INTEGER, task_id INTEGER, created_at TEXT, PRIMARY KEY(chat_id,message_id))")
-    cur.execute("CREATE TABLE IF NOT EXISTS v53_advices (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, advice TEXT, created_at TEXT, shown INTEGER DEFAULT 0)")
-    conn.commit()
-    conn.close()
-
-
-def v53_clear_states(context):
-    for key in [
-        "waiting_custom_reminder",
-        "task_draft_waiting",
-        "waiting_note_task_id",
-        "waiting_check_task_id",
-        V5_NOTE_WAIT if 'V5_NOTE_WAIT' in globals() else "v5_waiting_note",
-        "waiting_voice",
-    ]:
+    hm = re.search(r"(\d{1,2})[:.](\d{2})", cleaned)
+    hour = int(hm.group(1)) if hm else 10
+    minute = int(hm.group(2)) if hm else 0
+
+    if "Ù¾Ø³ ÙØ±Ø¯Ø§" in cleaned:
+        dt = now + timedelta(days=2)
+        return dt.replace(hour=hour, minute=minute, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M"), repeat
+    if "ÙØ±Ø¯Ø§" in cleaned:
+        dt = now + timedelta(days=1)
+        return dt.replace(hour=hour, minute=minute, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M"), repeat
+    if "Ø§ÙØ±ÙØ²" in cleaned:
+        dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return dt.strftime("%Y-%m-%d %H:%M"), repeat
+
+    # ISO-like formats.
+    for fmt in ["%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M"]:
         try:
-            context.user_data.pop(key, None)
+            dt = datetime.strptime(cleaned, fmt)
+            return dt.strftime("%Y-%m-%d %H:%M"), repeat
         except Exception:
             pass
 
-
-def v53_save_chat(update):
-    try:
-        if update.message and update.message.text and not update.message.text.startswith('/'):
-            save_chat_message(update)
-    except Exception as e:
-        print(f"v53 save chat error: {e}")
+    return None, repeat
 
 
-def v53_detect_project(text):
-    text = text or ""
-    if any(w in text for w in ["تخته", "چوب", "mdf", "ام دی اف", "الواری", "کاج", "روسیه"]):
-        return "تخته"
-    if any(w in text for w in ["میوه", "سیب", "پرتقال", "موز", "کیوی", "نارنگی", "نکتارین", "هندوانه", "کاهو", "سبزی"]):
-        return "میوه"
-    if any(w in text for w in ["پتروشیمی", "شیمی", "سایبر", "سیبور", "sibur", "sbr", "پلیمر", "نفت", "گاز"]):
-        return "پتروشیمی"
-    if any(w in text for w in ["مالی", "پول", "پرداخت", "حساب", "فاکتور", "بانک", "دلار", "روبل", "تومان", "بدهی", "طلب"]):
-        return "مالی"
-    if any(w in text for w in ["غلات", "گندم", "جو", "ذرت", "نخود", "لوبیا", "برنج", "دانه"]):
-        return "غلات"
-    return "غیره"
-
-
-def v53_priority(text):
-    text = text or ""
-    if any(w in text for w in ["فوری", "ضروری", "مهم", "زیاد", "بالا", "اورژانسی", "سریع"]):
-        return "🔴 زیاد"
-    if any(w in text for w in ["کم", "بعدا", "پایین", "آرام"]):
-        return "🟢 کم"
-    return "🟡 متوسط"
-
-
-def v53_status_from_text(text):
-    text = text or ""
-    for status, words in V53_STATUS_WORDS.items():
-        if any(w in text for w in words):
-            return status
+def parse_db_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value or value == "none":
+        return None
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
+        try:
+            return datetime.strptime(value, fmt)
+        except Exception:
+            pass
     return None
 
 
-def v53_open_tasks(limit=80):
-    conn = v5_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id,title,assigned_to,assigned_by,status,priority,reminder_time,created_at,completed_at,description,project,tag,reminder_repeat,deleted,pinned
-        FROM tasks
-        WHERE COALESCE(deleted,0)=0
-          AND status NOT IN ('done','cancelled')
-        ORDER BY COALESCE(pinned,0) DESC, id DESC
-        LIMIT ?
-    """, (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    keys = ["id","title","assigned_to","assigned_by","status","priority","reminder_time","created_at","completed_at","description","project","tag","reminder_repeat","deleted","pinned"]
-    return [dict(zip(keys, r)) for r in rows]
+def is_back(text: str) -> bool:
+    text = normalize_text(text).lower()
+    return text in ["Ø¨Ø§Ø²Ú¯Ø´Øª", "ð Ø¨Ø§Ø²Ú¯Ø´Øª", "â¬ï¸Ø¨Ø§Ø²Ú¯Ø´Øª", "ÙØºÙ", "cancel", "/exit", "exit", "Ø®Ø±ÙØ¬"]
 
 
-def v53_all_tasks(limit=10000):
-    return v5_tasks(False, limit)
+def trim(text: str, n: int = 80) -> str:
+    text = normalize_text(text)
+    return text if len(text) <= n else text[: n - 1] + "â¦"
 
 
-def v53_short_title(title, n=42):
-    title = (title or "").replace("\n", " ").strip()
-    return title[:n] + ("…" if len(title) > n else "")
+def user_name(update: Update) -> str:
+    return update.effective_user.full_name if update.effective_user else "Ú©Ø§Ø±Ø¨Ø±"
 
 
-def v53_list_keyboard(tasks=None):
-    tasks = tasks if tasks is not None else v53_open_tasks()
-    keyboard = []
-    if not tasks:
-        keyboard.append([InlineKeyboardButton("✅ کار بازی وجود ندارد", callback_data="v53:none")])
-    else:
-        for t in tasks[:40]:
-            status = STATUS_TEXT.get(t.get("status"), t.get("status"))
-            project = t.get("project") or v53_detect_project(t.get("title") or "")
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"#{t['id']} | {project} | {t.get('priority') or '🟡 متوسط'} | {v53_short_title(t.get('title'))}",
-                    callback_data=f"v53:open:{t['id']}"
-                )
-            ])
-    return InlineKeyboardMarkup(keyboard)
+def user_id(update: Update) -> Optional[int]:
+    return update.effective_user.id if update.effective_user else None
 
+# ------------------------- keyboards -------------------------
 
-def v53_task_menu(task_id):
-    return InlineKeyboardMarkup([
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("✅ انجام شد", callback_data=f"v53:status:{task_id}:done"),
-            InlineKeyboardButton("🔄 پیگیری", callback_data=f"v53:status:{task_id}:in_progress"),
+            ["â Ú©Ø§Ø± Ø¬Ø¯ÛØ¯", "ð Ú©Ø§Ø±ÙØ§"],
+            ["ð§  ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯", "ð§  ØªØ­ÙÛÙ ÚØª"],
+            ["ð ÙØ±ÙØ§Ù ØµÙØªÛ", "ð Ú¯Ø²Ø§Ø±Ø´âÙØ§"],
+            ["ð¥ Ø§Ø¹Ø¶Ø§", "ð¤ Ù¾Ø±ÙÙØ§ÛÙ"],
+            ["â Ø±Ø§ÙÙÙØ§"],
         ],
-        [
-            InlineKeyboardButton("⏳ منتظر", callback_data=f"v53:status:{task_id}:waiting"),
-            InlineKeyboardButton("⛔ لغو", callback_data=f"v53:status:{task_id}:cancelled"),
-        ],
-        [
-            InlineKeyboardButton("📁 پروژه", callback_data=f"v53:projectmenu:{task_id}"),
-            InlineKeyboardButton("📝 شرح‌ها", callback_data=f"v53:notes:{task_id}"),
-        ],
-        [
-            InlineKeyboardButton("📎 فایل‌ها", callback_data=f"v53:files:{task_id}"),
-            InlineKeyboardButton("🧾 تاریخچه", callback_data=f"v53:history:{task_id}"),
-        ],
-        [
-            InlineKeyboardButton("🗑 حذف", callback_data=f"v53:status:{task_id}:cancelled"),
-            InlineKeyboardButton("⬅️ لیست", callback_data="v53:list"),
-        ],
-    ])
+        resize_keyboard=True,
+    )
 
 
-def v53_project_keyboard(task_id):
+def back_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([["ð Ø¨Ø§Ø²Ú¯Ø´Øª"]], resize_keyboard=True)
+
+
+def project_keyboard(prefix: str = "new_project") -> InlineKeyboardMarkup:
     rows = []
-    for i, p in enumerate(V53_PROJECTS):
-        rows.append([InlineKeyboardButton(p, callback_data=f"v53:setproject:{task_id}:{i}")])
-    rows.append([InlineKeyboardButton("⬅️ برگشت", callback_data=f"v53:open:{task_id}")])
+    for i in range(0, len(PROJECTS), 2):
+        row = []
+        for p in PROJECTS[i:i + 2]:
+            row.append(InlineKeyboardButton(p, callback_data=f"{prefix}:{p}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("ð Ø¨Ø§Ø²Ú¯Ø´Øª", callback_data="main:back")])
     return InlineKeyboardMarkup(rows)
 
 
-def v53_task_text(t):
-    status = STATUS_TEXT.get(t.get('status'), t.get('status'))
-    project = t.get('project') or v53_detect_project(t.get('title') or '')
-    rem = t.get('reminder_time') or 'none'
-    rem = 'ندارد' if rem == 'none' else rem
-    desc = t.get('description') or '-'
-    return f"""📌 کار #{t['id']}
-
-{t.get('title')}
-
-📁 پروژه: {project}
-🔥 اولویت: {t.get('priority') or '🟡 متوسط'}
-📍 وضعیت: {status}
-⏰ یادآوری: {rem}
-
-📝 توضیح:
-{desc}"""
-
-
-def v53_find_task(text):
-    text = fa_to_en_digits(text or "")
-    m = re.search(r"(?:کار|task|#)\s*(\d+)", text, flags=re.I)
-    if m:
-        return v5_task(int(m.group(1)))
-
-    # مثال: «کار kkk انجام شد» یا «kkk انجام شد»
-    cleaned = text
-    for w in ["کار", "انجام شد", "انجام", "تمام شد", "منتظر", "پیگیری", "لغو", "کنسل", "حذف"]:
-        cleaned = cleaned.replace(w, " ")
-    words = [w.strip() for w in re.split(r"\s+", cleaned) if len(w.strip()) >= 2]
-    if not words:
-        return None
-    tasks = v53_open_tasks(120)
-    for t in tasks:
-        title = (t.get('title') or '').lower()
-        if any(w.lower() in title for w in words):
-            return t
-    return None
+def task_list_keyboard(tasks: List[Dict[str, Any]], page: int = 0, per_page: int = 12) -> InlineKeyboardMarkup:
+    start = page * per_page
+    selected = tasks[start:start + per_page]
+    rows = []
+    for t in selected:
+        label = f"#{t['id']} | {STATUS_EMOJI.get(t['status'], '')} {trim(t['title'], 42)}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"task:open:{t['id']}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("â¬ï¸ ÙØ¨ÙÛ", callback_data=f"tasks:page:{page-1}"))
+    if start + per_page < len(tasks):
+        nav.append(InlineKeyboardButton("Ø¨Ø¹Ø¯Û â¡ï¸", callback_data=f"tasks:page:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("â Ú©Ø§Ø± Ø¬Ø¯ÛØ¯", callback_data="new:start")])
+    return InlineKeyboardMarkup(rows)
 
 
-def v53_insert_task(title, assigned_to, assigned_by, priority, project, description="", reminder_time="none"):
-    conn = v5_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO tasks (title,assigned_to,assigned_by,status,priority,reminder_time,created_at,description,project,tag)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (title, assigned_to, assigned_by, "pending", priority, reminder_time, v5_now(), description, project, "عمومی"))
-    task_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+def task_menu_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("â Ø§ÙØ¬Ø§Ù Ø´Ø¯", callback_data=f"task:status:{task_id}:done"),
+            InlineKeyboardButton("ð Ù¾ÛÚ¯ÛØ±Û", callback_data=f"task:status:{task_id}:in_progress"),
+        ],
+        [
+            InlineKeyboardButton("â³ ÙÙØªØ¸Ø± Ù¾Ø§Ø³Ø®", callback_data=f"task:status:{task_id}:waiting"),
+            InlineKeyboardButton("â ÙØºÙ", callback_data=f"task:status:{task_id}:cancelled"),
+        ],
+        [
+            InlineKeyboardButton("ð Ø´Ø±Ø­âÙØ§", callback_data=f"task:notes:{task_id}"),
+            InlineKeyboardButton("â Ø´Ø±Ø­", callback_data=f"task:add_note:{task_id}"),
+        ],
+        [
+            InlineKeyboardButton("âï¸ ÚÚ©âÙÛØ³Øª", callback_data=f"task:checklist:{task_id}"),
+            InlineKeyboardButton("â ÚÚ©âÙÛØ³Øª", callback_data=f"task:add_check:{task_id}"),
+        ],
+        [
+            InlineKeyboardButton("ð ÙØ§ÛÙâÙØ§", callback_data=f"task:files:{task_id}"),
+            InlineKeyboardButton("â° ÛØ§Ø¯Ø¢ÙØ±Û", callback_data=f"task:remind:{task_id}"),
+        ],
+        [
+            InlineKeyboardButton("ð§¾ ØªØ§Ø±ÛØ®ÚÙ", callback_data=f"task:history:{task_id}"),
+            InlineKeyboardButton("ð Ù¾ÛÙ", callback_data=f"task:pin:{task_id}"),
+        ],
+        [
+            InlineKeyboardButton("ð Ø­Ø°Ù", callback_data=f"task:delete:{task_id}"),
+            InlineKeyboardButton("ð ÙÛØ³Øª Ú©Ø§Ø±ÙØ§", callback_data="tasks:page:0"),
+        ],
+    ])
+
+
+def summary_range_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Û± Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±", callback_data="summary:1h"), InlineKeyboardButton("Û² Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±", callback_data="summary:2h")],
+        [InlineKeyboardButton("Ø¯ÛØ±ÙØ²", callback_data="summary:yesterday"), InlineKeyboardButton("Û· Ø±ÙØ² Ø§Ø®ÛØ±", callback_data="summary:7d")],
+        [InlineKeyboardButton("ð Ø¨Ø§Ø²Ú¯Ø´Øª", callback_data="main:back")],
+    ])
+
+
+def reports_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [["ð Ø¢ÙØ§Ø±", "ð Ú¯Ø²Ø§Ø±Ø´ Ø±ÙØ²Ø§ÙÙ"], ["ð Ú¯Ø²Ø§Ø±Ø´ ÙÙØªÚ¯Û", "ð¥ Ø®Ø±ÙØ¬Û Ø§Ú©Ø³Ù"], ["ð Ø®Ø±ÙØ¬Û PDF", "ð Ø¨Ø§Ø²Ú¯Ø´Øª"]],
+        resize_keyboard=True,
+    )
+
+# ------------------------- formatters -------------------------
+
+def task_summary_label(task: Dict[str, Any]) -> str:
+    pin = "ð " if task.get("pinned") else ""
+    status = STATUSES.get(task.get("status"), task.get("status"))
+    return f"{pin}#{task['id']} | {status} | {task.get('project') or 'ØºÛØ±Ù'} | {trim(task['title'], 60)}"
+
+
+def task_menu_text(task: Dict[str, Any]) -> str:
+    assigned = "ÙØ§ÙØ´Ø®Øµ"
+    if task.get("assigned_to"):
+        u = get_user(int(task["assigned_to"]))
+        assigned = u.get("full_name") if u else str(task.get("assigned_to"))
+    reminder = task.get("reminder_time") or "none"
+    if reminder == "none":
+        reminder = "ÙØ¯Ø§Ø±Ø¯"
+    title = html.escape(task.get("title") or "")
+    desc = html.escape(task.get("description") or "-")
+    return (
+        f"ð <b>Ú©Ø§Ø± #{task['id']}</b>\n\n"
+        f"ð <b>Ø¹ÙÙØ§Ù:</b>\n{title}\n\n"
+        f"ð <b>Ù¾Ø±ÙÚÙ:</b> {html.escape(task.get('project') or 'ØºÛØ±Ù')}\n"
+        f"ð <b>ÙØ¶Ø¹ÛØª:</b> {STATUSES.get(task.get('status'), task.get('status'))}\n"
+        f"ð¥ <b>Ø§ÙÙÙÛØª:</b> {html.escape(task.get('priority') or 'ÙØªÙØ³Ø·')}\n"
+        f"ð¤ <b>ÙØ³Ø¦ÙÙ:</b> {html.escape(assigned or 'ÙØ§ÙØ´Ø®Øµ')}\n"
+        f"â° <b>ÛØ§Ø¯Ø¢ÙØ±Û:</b> {html.escape(reminder)}\n\n"
+        f"ð <b>ØªÙØ¶ÛØ­:</b>\n{desc}"
+    )
+
+
+def task_list_text(tasks: List[Dict[str, Any]]) -> str:
+    if not tasks:
+        return "ð Ú©Ø§Ø±ÙØ§Û Ø¨Ø§Ø²\n\nâ Ú©Ø§Ø± Ø¨Ø§Ø²Û ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯."
+    return "ð Ú©Ø§Ø±ÙØ§Û Ø¨Ø§Ø²\n\nØ±ÙÛ ÙØ± Ú©Ø§Ø± Ø¨Ø²Ù ØªØ§ ÙÙÙÛ ÙÙØ§Ù Ú©Ø§Ø± Ø¨Ø§Ø² Ø´ÙØ¯."
+
+# ------------------------- common actions -------------------------
+
+async def register_user(update: Update) -> None:
+    if not update.effective_user:
+        return
+    role = "admin" if count_admins() == 0 else "member"
+    add_user(update.effective_user.id, update.effective_user.username or "", update.effective_user.full_name or "", role, now_str())
+
+
+def clear_user_states(context: ContextTypes.DEFAULT_TYPE, uid: Optional[int] = None) -> None:
+    context.user_data.clear()
+    if uid is not None:
+        USER_STATE.pop(uid, None)
+
+
+async def show_task_list(update_or_query: Any, context: ContextTypes.DEFAULT_TYPE, page: int = 0, edit: bool = False) -> None:
+    tasks = get_open_tasks(200)
+    text = task_list_text(tasks)
+    keyboard = task_list_keyboard(tasks, page=page)
+    if hasattr(update_or_query, "edit_message_text"):
+        await update_or_query.edit_message_text(text, reply_markup=keyboard)
+        return
+    msg = await update_or_query.message.reply_text(text, reply_markup=keyboard)
+    # List message is not linked to a single task. Individual task menus will be linked.
+
+
+async def open_task_menu(query, task_id: int) -> None:
+    task = get_task(task_id)
+    if not task or task.get("deleted"):
+        await query.edit_message_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯ ÛØ§ Ø­Ø°Ù Ø´Ø¯Ù Ø§Ø³Øª.")
+        return
+    await query.edit_message_text(task_menu_text(task), reply_markup=task_menu_keyboard(task_id), parse_mode="HTML")
     try:
-        v5_history(task_id, assigned_by, v5_member_name(assigned_by), "create", "", title)
+        link_task_message(query.message.chat_id, query.message.message_id, task_id)
     except Exception:
         pass
+
+
+async def create_task_silent(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, project: Optional[str] = None) -> Optional[int]:
+    title = normalize_text(title)
+    if not title:
+        await update.message.reply_text("Ø¹ÙÙØ§Ù Ú©Ø§Ø± Ø®Ø§ÙÛ Ø§Ø³Øª.")
+        return None
+    project = project or detect_project(title)
+    priority = detect_priority(title)
+    assigned_to = user_id(update)
+    task_id = create_task(
+        title=title,
+        assigned_to=assigned_to,
+        assigned_by=user_id(update),
+        priority=priority,
+        reminder_time="none",
+        created_at=now_str(),
+        description="",
+        project=project,
+        tag="",
+    )
+    add_history(task_id, user_id(update), user_name(update), "create", "", title)
+    await update.message.reply_text("â Ø«Ø¨Øª Ø´Ø¯")
     return task_id
 
 
-async def v53_create_from_text(update, context, raw):
-    raw = (raw or "").strip()
-    title = re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید|ثبت کار|بساز)\s*[:：\-]?\s*", "", raw).strip()
-    if not title:
-        await update.message.reply_text("عنوان کار را بنویس.")
-        raise ApplicationHandlerStop
-    assigned_to = update.effective_user.id
-    assigned_name = update.effective_user.full_name
-    for u in get_users():
-        uid, username, full_name, role = u[:4]
-        if (full_name and full_name.split()[0] in raw) or (username and ('@' + username) in raw):
-            assigned_to = uid
-            assigned_name = full_name
-            break
-    project = v53_detect_project(raw)
-    task_id = v53_insert_task(
-        title=title[:180],
-        assigned_to=assigned_to,
-        assigned_by=update.effective_user.id,
-        priority=v53_priority(raw),
-        project=project,
-        description=f"ثبت از پیام: {raw}",
-        reminder_time="none"
-    )
-    try:
-        v5_note(task_id, update.effective_user.id, update.effective_user.full_name, f"متن اولیه: {raw}", "create", update.message.message_id)
-    except Exception:
-        pass
-    await update.message.reply_text("✅ ثبت شد")
-    raise ApplicationHandlerStop
-
-
-async def v53_add_note(update, task_id, note, source="manual"):
-    t = v5_task(task_id) if task_id else None
-    if not t:
-        await update.message.reply_text("❌ کار پیدا نشد")
-        raise ApplicationHandlerStop
-    v5_note(task_id, update.effective_user.id, update.effective_user.full_name, note, source, update.message.message_id)
-    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "add_note", "", note)
-    status = v53_status_from_text(note)
-    if status:
-        old = t.get('status')
-        v5_update(task_id, "status", status)
-        if status == "done":
-            v5_update(task_id, "completed_at", v5_now())
-        v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "auto_status_from_note", old, status)
-    await update.message.reply_text("✅ ثبت شد")
-    raise ApplicationHandlerStop
-
-
-async def v53_set_status(update, task, status):
+async def set_status_and_reply(update: Update, task_id: int, status: str, quiet: bool = False) -> None:
+    task = get_task(task_id)
     if not task:
-        await update.message.reply_text("❌ کار پیدا نشد")
-        raise ApplicationHandlerStop
-    old = task.get('status')
-    task_id = task['id']
-    v5_update(task_id, "status", status)
+        if not quiet:
+            await update.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    old = task.get("status")
+    update_task_field(task_id, "status", status)
     if status == "done":
-        v5_update(task_id, "completed_at", v5_now())
-    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "status_text", old, status)
-    await update.message.reply_text("✅ ثبت شد")
-    raise ApplicationHandlerStop
+        update_task_field(task_id, "completed_at", now_str())
+    add_history(task_id, user_id(update), user_name(update), "status", old, status)
+    add_task_note(task_id, user_id(update), user_name(update), f"ÙØ¶Ø¹ÛØª ØªØºÛÛØ± Ú©Ø±Ø¯: {STATUSES.get(old, old)} â {STATUSES.get(status, status)}", "status")
+    if not quiet:
+        await update.message.reply_text("â Ø§ÙØ¬Ø§Ù Ø´Ø¯")
 
 
-async def v53_send_list(update, context, text="📋 کارهای باز"):
-    v53_clear_states(context)
-    await register_user(update)
-    tasks = v53_open_tasks()
-    await update.message.reply_text(
-        f"{text}\n\nروی هر کار بزن تا منوی همان کار باز شود.",
-        reply_markup=v53_list_keyboard(tasks)
-    )
-    raise ApplicationHandlerStop
-
-
-async def v53_start(update, context):
-    v53_clear_states(context)
-    await register_user(update)
-    keyboard = [
-        ["➕ کار جدید", "📋 کارها"],
-        ["🧠 تحلیل چت", "🧠 مدیر هوشمند"],
-        ["🎙 فرمان صوتی", "🤖 دستیار هوشمند"],
-        ["📊 گزارش‌ها", "❓ راهنما"],
-        ["👥 اعضا", "👤 پروفایل"],
-        ["⏱ پیگیری"],
-    ]
-    await update.message.reply_text("✅ ربات آماده است", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-    raise ApplicationHandlerStop
-
-
-async def v53_help(update, context):
-    v53_clear_states(context)
-    await update.message.reply_text(
-        """❓ راهنما
-
-📋 /tasks — لیست دکمه‌ای کارها
-🧠 /smart — تحلیل چت و کارها با ChatGPT
-📤 /export_excel — خروجی اکسل
-
-نمونه‌ها:
-کار جدید: پیگیری قیمت تخته
-کار 1 انجام شد
-کار 1: زنگ زدم جواب ندادند
-/remind 1 2026-06-25 18:00"""
-    )
-    raise ApplicationHandlerStop
-
-
-async def v53_tasks_cmd(update, context):
-    await v53_send_list(update, context)
-
-
-async def v53_followup_cmd(update, context):
-    await v53_send_list(update, context, "⏱ پیگیری کارهای باز")
-
-
-async def v53_done_cmd(update, context):
-    v53_clear_states(context)
-    text = " ".join(context.args)
-    if not text:
-        await update.message.reply_text("مثال: /done 1")
-        raise ApplicationHandlerStop
-    task = v53_find_task("کار " + text + " انجام شد")
-    await v53_set_status(update, task, "done")
-
-
-async def v53_delete_cmd(update, context):
-    v53_clear_states(context)
-    text = " ".join(context.args)
-    if not text:
-        await update.message.reply_text("مثال: /delete 1")
-        raise ApplicationHandlerStop
-    task = v53_find_task("کار " + text + " حذف")
+async def add_note_and_reply(update: Update, task_id: int, note: str, source: str = "manual", quiet: bool = False) -> None:
+    task = get_task(task_id)
     if not task:
-        await update.message.reply_text("❌ کار پیدا نشد")
-        raise ApplicationHandlerStop
-    v5_update(task['id'], "status", "cancelled")
-    v5_update(task['id'], "deleted", 1)
-    v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "delete", "", "cancelled")
-    await update.message.reply_text("✅ ثبت شد")
-    raise ApplicationHandlerStop
+        if not quiet:
+            await update.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    note = normalize_text(note)
+    if not note:
+        return
+    add_task_note(task_id, user_id(update), user_name(update), note, source, update.message.message_id if update.message else None)
+    add_history(task_id, user_id(update), user_name(update), "add_note", "", note)
+    status = detect_status_from_text(note)
+    if status:
+        update_task_field(task_id, "status", status)
+        if status == "done":
+            update_task_field(task_id, "completed_at", now_str())
+        add_history(task_id, user_id(update), user_name(update), "auto_status_from_note", task.get("status"), status)
+    if not quiet:
+        await update.message.reply_text("â Ø«Ø¨Øª Ø´Ø¯")
 
+# ------------------------- commands -------------------------
 
-async def v53_remind_cmd(update, context):
-    v53_clear_states(context)
-    if len(context.args) < 2:
-        await update.message.reply_text("مثال: /remind 1 2026-06-25 18:00")
-        raise ApplicationHandlerStop
-    task = v53_find_task("کار " + context.args[0])
-    if not task:
-        await update.message.reply_text("❌ کار پیدا نشد")
-        raise ApplicationHandlerStop
-    reminder = v52_parse_reminder_text(" ".join(context.args[1:]))
-    if reminder is None:
-        await update.message.reply_text("❌ فرمت زمان اشتباه است. مثال: /remind 1 2026-06-25 18:00")
-        raise ApplicationHandlerStop
-    v5_update(task['id'], "reminder_time", reminder)
-    v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "remind", task.get('reminder_time'), reminder)
-    await update.message.reply_text("✅ ثبت شد")
-    raise ApplicationHandlerStop
-
-
-async def v53_export_excel(update, context):
-    v53_clear_states(context)
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Tasks"
-        headers = ["ID", "عنوان", "پروژه", "وضعیت", "اولویت", "مسئول", "یادآوری", "تاریخ ثبت", "توضیح"]
-        ws.append(headers)
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center")
-        for t in v53_all_tasks(10000):
-            ws.append([
-                t.get('id'),
-                t.get('title'),
-                t.get('project') or v53_detect_project(t.get('title') or ''),
-                STATUS_TEXT.get(t.get('status'), t.get('status')),
-                t.get('priority'),
-                v5_member_name(t.get('assigned_to')),
-                t.get('reminder_time'),
-                t.get('created_at'),
-                t.get('description'),
-            ])
-        for col in ws.columns:
-            max_len = max(len(str(c.value or "")) for c in col)
-            ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 2, 10), 45)
-        path = tempfile.mktemp(suffix=".xlsx")
-        wb.save(path)
-        with open(path, "rb") as f:
-            await update.message.reply_document(document=InputFile(f, filename="sam_tasks_report.xlsx"))
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطای خروجی اکسل: {e}")
-    raise ApplicationHandlerStop
-
-
-async def v53_today_cmd(update, context):
-    v53_clear_states(context)
-    today = datetime.now().strftime("%Y-%m-%d")
-    tasks = [t for t in v53_open_tasks(200) if str(t.get('created_at') or '').startswith(today) or str(t.get('reminder_time') or '').startswith(today)]
-    await update.message.reply_text(
-        "📅 کارهای امروز\n\nروی هر کار بزن تا منوی همان کار باز شود.",
-        reply_markup=v53_list_keyboard(tasks)
-    )
-    raise ApplicationHandlerStop
-
-
-def v53_recent_chat(chat_id, limit=80):
-    try:
-        rows = get_recent_chat_messages(chat_id, limit=limit)
-        return rows
-    except Exception:
-        return []
-
-
-def v53_json(text):
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    try:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-    except Exception:
-        pass
-    return {}
-
-
-def v53_store_advice(chat_id, advice):
-    conn = v5_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO v53_advices (chat_id, advice, created_at, shown) VALUES (?,?,?,0)", (chat_id, advice, v5_now()))
-    sid = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return sid
-
-
-def v53_get_advice(advice_id):
-    conn = v5_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, chat_id, advice, created_at, shown FROM v53_advices WHERE id=?", (advice_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-async def v53_smart_cmd(update, context):
-    v53_clear_states(context)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await register_user(update)
-    if not v53_has_openai_key():
-        await update.message.reply_text("❌ OPENAI_API_KEY تنظیم نشده")
-        raise ApplicationHandlerStop
-
-    wait_msg = await update.message.reply_text("🧠 در حال تحلیل چت و کارها...")
-    chat_id = update.effective_chat.id
-    messages = v53_recent_chat(chat_id, 80)
-    tasks = v53_open_tasks(80)
-
-    if not messages:
-        await update.message.reply_text("پیامی برای تحلیل ذخیره نشده. چند پیام در گروه بفرست و دوباره /smart را بزن.")
-        raise ApplicationHandlerStop
-
-    history = "\n".join(f"{r[2]} | {r[0]}: {r[1]}" for r in messages[-80:])
-    task_text = "\n".join(f"#{t['id']} | {t['title']} | پروژه:{t.get('project')} | وضعیت:{t.get('status')} | اولویت:{t.get('priority')}" for t in tasks)
-
-    prompt = f"""
-تو مدیر هوشمند تیم هستی. چت گروه و لیست کارهای باز را تحلیل کن.
-هدف: کارهای انجام‌شده را تشخیص بده، شرح‌های مربوط به کارها را پیدا کن، کار جدید لازم را استخراج کن، و اشتباهات برنامه‌ریزی/ریسک‌ها/مشورت مدیریتی را جداگانه پیشنهاد بده.
-
-قانون مهم:
-- اگر یک پیام مثل «زنگ زدم جواب ندادند» مربوط به کار باز است، type را add_note بگذار و note بده.
-- اگر کاری انجام شده، type را change_status و new_status=done بگذار.
-- اگر کار جدید لازم است، type را new_task بگذار.
-- اگر فقط نظر مدیریتی، اشتباه برنامه‌ریزی یا مشورت داری، type را advice بگذار. advice نباید مستقیم اعمال شود.
-- فقط JSON معتبر بده، بدون متن اضافه.
-
-فرمت خروجی:
-{{
-  "actions": [
-    {{
-      "type": "new_task|add_note|change_status|advice",
-      "task_id": 0,
-      "task_title_match": "اگر id مشخص نیست بخشی از عنوان کار",
-      "title": "برای new_task",
-      "note": "شرح یا مشورت",
-      "new_status": "done|waiting|in_progress|cancelled|",
-      "project": "تخته|میوه|پتروشیمی|مالی|غلات|غیره",
-      "priority": "🔴 زیاد|🟡 متوسط|🟢 کم",
-      "reason": "دلیل کوتاه",
-      "confidence": 0.0
-    }}
-  ]
-}}
-
-کارهای باز:
-{task_text if task_text else 'هیچ کار بازی نیست'}
-
-چت اخیر:
-{history}
-"""
-    try:
-        res = client.chat.completions.create(
-            model=v53_model(),
-            messages=[
-                {"role": "system", "content": "فقط JSON معتبر خروجی بده."},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        data = v53_json(res.choices[0].message.content or "{}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطای مدیر هوشمند: {e}")
-        raise ApplicationHandlerStop
-
-    actions = data.get("actions", []) if isinstance(data, dict) else []
-    created = notes = statuses = 0
-    advices = []
-
-    for a in actions[:12]:
-        try:
-            confidence = float(a.get("confidence", 0) or 0)
-        except Exception:
-            confidence = 0
-        if confidence < 0.50:
-            continue
-        typ = str(a.get("type", "")).strip()
-        task_id = a.get("task_id") or 0
-        try:
-            task_id = int(task_id)
-        except Exception:
-            task_id = 0
-        task = v5_task(task_id) if task_id else None
-        if not task and a.get("task_title_match"):
-            task = v53_find_task(str(a.get("task_title_match")))
-        note = str(a.get("note", "")).strip()
-        title = str(a.get("title", "")).strip()
-        project = str(a.get("project", "")).strip()
-        if project not in V53_PROJECTS:
-            project = v53_detect_project(title + " " + note)
-        priority = str(a.get("priority", "")).strip()
-        if priority not in ["🔴 زیاد", "🟡 متوسط", "🟢 کم"]:
-            priority = v53_priority(title + " " + note)
-        if typ == "new_task" and title:
-            v53_insert_task(title[:180], update.effective_user.id, update.effective_user.id, priority, project, f"ساخته‌شده توسط مدیر هوشمند. دلیل: {a.get('reason','')}")
-            created += 1
-        elif typ == "add_note" and task and note:
-            v5_note(task['id'], update.effective_user.id, update.effective_user.full_name, note, "smart_ai", None)
-            v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "smart_add_note", "", note)
-            notes += 1
-        elif typ == "change_status" and task:
-            new_status = str(a.get("new_status", "")).strip()
-            if new_status in ["done", "waiting", "in_progress", "cancelled"]:
-                old = task.get('status')
-                v5_update(task['id'], "status", new_status)
-                if new_status == "done":
-                    v5_update(task['id'], "completed_at", v5_now())
-                v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "smart_status", old, new_status)
-                statuses += 1
-        elif typ == "advice" and note:
-            advices.append(note)
-
-    result = f"✅ تحلیل شد\n\n➕ کار جدید: {created}\n📝 شرح اضافه‌شده: {notes}\n✅ تغییر وضعیت: {statuses}"
-    await update.message.reply_text(result)
-    if advices:
-        advice_text = "\n\n".join(f"• {x}" for x in advices[:5])
-        aid = v53_store_advice(chat_id, advice_text)
-        await update.message.reply_text(
-            "🧠 کامنت مدیریتی دارم. نمایش بدهم؟",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ نمایش کامنت", callback_data=f"v53:showadvice:{aid}")]])
-        )
-    raise ApplicationHandlerStop
+    clear_user_states(context, user_id(update))
+    await update.message.reply_text("â Ø±Ø¨Ø§Øª Ø¢ÙØ§Ø¯Ù Ø§Ø³Øª", reply_markup=main_keyboard())
 
 
-
-
-async def v53_summary_cmd(update, context):
-    v53_clear_states(context)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
     await update.message.reply_text(
-        "🧠 بازه تحلیل چت را انتخاب کن:",
-        reply_markup=ReplyKeyboardMarkup([["⏱ یک ساعت اخیر", "⏱ دو ساعت اخیر"], ["📅 دیروز", "📊 ۷ روز اخیر"], ["⬅️بازگشت"]], resize_keyboard=True)
+        "â Ø±Ø§ÙÙÙØ§\n\n"
+        "ð /tasks â ÙÛØ³Øª Ø¯Ú©ÙÙâØ§Û Ú©Ø§Ø±ÙØ§\n"
+        "â /newtask Ø¹ÙÙØ§Ù Ú©Ø§Ø± â Ø«Ø¨Øª Ú©Ø§Ø±\n"
+        "â /done 1 â Ø§ÙØ¬Ø§ÙâØ´Ø¯Ù Ú©Ø±Ø¯Ù Ú©Ø§Ø±\n"
+        "â° /remind 1 2026-06-25 18:00 â ÛØ§Ø¯Ø¢ÙØ±Û\n"
+        "ð§  /smart â ØªØ­ÙÛÙ ÚØª Ù Ú©Ø§Ø±ÙØ§ Ø¨Ø§ ChatGPT\n"
+        "ð¥ /export_excel â Ø®Ø±ÙØ¬Û Ø§Ú©Ø³Ù\n"
+        "ð /export_pdf â Ø®Ø±ÙØ¬Û PDF\n\n"
+        "ÙØªÙÛ ÙÙ ÙÛâØªÙØ§ÙÛ Ø¨ÙÙÛØ³Û:\n"
+        "Ú©Ø§Ø± Ø¬Ø¯ÛØ¯: Ù¾ÛÚ¯ÛØ±Û ÙØ§ÙÛ Ø¨Ø§ Ø­Ø³Ø§Ø¨Ø¯Ø§Ø±\n"
+        "Ú©Ø§Ø± 1: Ø²ÙÚ¯ Ø²Ø¯Ù Ø¬ÙØ§Ø¨ ÙØ¯Ø§Ø¯ÙØ¯\n"
+        "Ú©Ø§Ø± 1 Ø§ÙØ¬Ø§Ù Ø´Ø¯",
+        reply_markup=main_keyboard(),
     )
-    raise ApplicationHandlerStop
 
 
-async def v53_newtask_cmd(update, context):
-    v53_clear_states(context)
-    raw = " ".join(context.args).strip()
-    if not raw:
-        await update.message.reply_text("مثال: /newtask پیگیری مالی با حسابدار")
-        raise ApplicationHandlerStop
-    await v53_create_from_text(update, context, raw)
+async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    await show_task_list(update, context)
 
-async def v53_text_router(update, context):
+
+async def newtask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    if raw:
+        await create_task_silent(update, context, raw)
+        return
+    context.user_data["new_project"] = None
+    await update.message.reply_text("ð Ù¾Ø±ÙÚÙ Ú©Ø§Ø± Ø±Ø§ Ø§ÙØªØ®Ø§Ø¨ Ú©Ù:", reply_markup=project_keyboard())
+
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    task_id = extract_task_id(raw)
+    if not task_id:
+        await update.message.reply_text("ÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/done 1")
+        return
+    await set_status_and_reply(update, task_id, "done")
+
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    task_id = extract_task_id(raw)
+    if not task_id:
+        await update.message.reply_text("ÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/delete 1")
+        return
+    task = get_task(task_id)
+    if not task:
+        await update.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    update_task_field(task_id, "deleted", 1)
+    update_task_field(task_id, "status", "cancelled")
+    add_history(task_id, user_id(update), user_name(update), "delete", "", "deleted")
+    await update.message.reply_text("â Ø­Ø°Ù Ø´Ø¯")
+
+
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    task_id = extract_task_id(raw)
+    if not task_id:
+        await update.message.reply_text("ÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/restore 1")
+        return
+    task = get_task(task_id)
+    if not task:
+        await update.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    update_task_field(task_id, "deleted", 0)
+    update_task_field(task_id, "status", "pending")
+    add_history(task_id, user_id(update), user_name(update), "restore", "deleted", "pending")
+    await update.message.reply_text("â Ø¨Ø§Ø²ÛØ§Ø¨Û Ø´Ø¯")
+
+
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        await update.message.reply_text("ÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/remind 1 2026-06-25 18:00\n/remind 1 ÙØ±Ø¯Ø§ 10:00")
+        return
+    task_id = extract_task_id(parts[0])
+    dt, repeat = parse_datetime_text(parts[1])
+    if not task_id or dt is None:
+        await update.message.reply_text("â ÙØ±ÙØª Ø²ÙØ§Ù Ø§Ø´ØªØ¨Ø§Ù Ø§Ø³Øª.\nÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/remind 1 2026-06-25 18:00")
+        return
+    task = get_task(task_id)
+    if not task:
+        await update.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    update_task_field(task_id, "reminder_time", dt)
+    update_task_field(task_id, "reminder_repeat", repeat)
+    add_history(task_id, user_id(update), user_name(update), "reminder", task.get("reminder_time"), f"{dt} / {repeat}")
+    await update.message.reply_text("â ØªÙØ¸ÛÙ Ø´Ø¯")
+
+
+async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        await update.message.reply_text("ÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/note 1 Ø²ÙÚ¯ Ø²Ø¯Ù Ø¬ÙØ§Ø¨ ÙØ¯Ø§Ø¯ÙØ¯")
+        return
+    task_id = extract_task_id(parts[0])
+    if not task_id:
+        await update.message.reply_text("Ø´ÙØ§Ø±Ù Ú©Ø§Ø± Ø±Ø§ ÙÙÙØ´ØªÛ.")
+        return
+    await add_note_and_reply(update, task_id, parts[1], "command")
+
+
+async def checklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        await update.message.reply_text("ÙØ«Ø§Ù Ø¯Ø±Ø³Øª:\n/checklist 1 Ø§Ø±Ø³Ø§Ù ÙØ±Ø§Ø±Ø¯Ø§Ø¯")
+        return
+    task_id = extract_task_id(parts[0])
+    if not task_id or not get_task(task_id):
+        await update.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    add_checklist_item(task_id, parts[1], user_id(update))
+    add_history(task_id, user_id(update), user_name(update), "add_checklist", "", parts[1])
+    await update.message.reply_text("â Ø«Ø¨Øª Ø´Ø¯")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    tasks = get_tasks(include_done=True, include_deleted=False, limit=10000)
+    total = len(tasks)
+    done = len([t for t in tasks if t.get("status") == "done"])
+    open_count = len([t for t in tasks if t.get("status") not in ["done", "cancelled"]])
+    await update.message.reply_text(f"ð Ø¢ÙØ§Ø±\n\nÚ©Ù Ú©Ø§Ø±ÙØ§: {total}\nØ§ÙØ¬Ø§ÙâØ´Ø¯Ù: {done}\nØ¨Ø§Ø²: {open_count}")
+
+
+async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    await update.message.reply_text(build_daily_report())
+
+
+async def weekly_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    await update.message.reply_text(build_weekly_report())
+
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    raw = clean_command_arg_text(update, context)
+    if raw:
+        await send_chat_summary(update, context, raw)
+        return
+    await update.message.reply_text("ð§  Ø¨Ø§Ø²Ù ØªØ­ÙÛÙ Ø±Ø§ Ø§ÙØªØ®Ø§Ø¨ Ú©Ù:", reply_markup=summary_range_keyboard())
+
+
+async def smart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    msg = await update.message.reply_text("ð§  Ø¯Ø± Ø­Ø§Ù ØªØ­ÙÛÙ ÚØª Ù Ú©Ø§Ø±ÙØ§â¦")
+    await run_smart_analysis(update, context, progress_message=msg)
+
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    USER_STATE[user_id(update)] = "ai"
+    await update.message.reply_text("ð¤ Ø¯Ø³ØªÛØ§Ø± ÙØ¹Ø§Ù Ø´Ø¯. Ø³ÙØ§ÙØª Ø±Ø§ Ø¨ÙÙÛØ³. Ø¨Ø±Ø§Û Ø®Ø±ÙØ¬ /exit", reply_markup=back_keyboard())
+
+
+async def exit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_states(context, user_id(update))
+    await update.message.reply_text("â Ø®Ø§Ø±Ø¬ Ø´Ø¯", reply_markup=main_keyboard())
+
+
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    u = get_user(user_id(update))
+    role = "ÙØ¯ÛØ±" if u and u.get("role") == "admin" else "Ø¹Ø¶Ù"
+    await update.message.reply_text(f"ð¤ Ù¾Ø±ÙÙØ§ÛÙ\n\nÙØ§Ù: {user_name(update)}\nÙÙØ´: {role}")
+
+
+async def members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    users = get_users()
+    if not users:
+        await update.message.reply_text("ÙÙÙØ² Ø¹Ø¶ÙÛ Ø«Ø¨Øª ÙØ´Ø¯Ù.")
+        return
+    lines = ["ð¥ Ø§Ø¹Ø¶Ø§"]
+    for u in users:
+        icon = "ð" if u.get("role") == "admin" else "ð¤"
+        lines.append(f"{icon} {u.get('full_name') or '-'} | @{u.get('username') or '-'}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"Chat ID:\n{update.effective_chat.id}\n\nType:\n{update.effective_chat.type}")
+
+
+async def export_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    try:
+        path = build_excel_report()
+        await update.message.reply_document(document=InputFile(path), filename="sam_tasks_report.xlsx")
+    except Exception as e:
+        await update.message.reply_text(f"â Ø®Ø·Ø§Û Ø®Ø±ÙØ¬Û Ø§Ú©Ø³Ù: {e}")
+
+
+async def export_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    try:
+        path = build_pdf_report()
+        await update.message.reply_document(document=InputFile(path), filename=os.path.basename(path))
+    except Exception as e:
+        await update.message.reply_text(f"â Ø®Ø·Ø§Û Ø®Ø±ÙØ¬Û PDF: {e}")
+
+# ------------------------- callbacks -------------------------
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await register_user(update)
+    data = query.data or ""
+
+    if data == "main:back":
+        clear_user_states(context, query.from_user.id)
+        await query.message.reply_text("â Ø¨Ø§Ø²Ú¯Ø´Øª", reply_markup=main_keyboard())
+        return
+
+    if data == "new:start":
+        await query.message.reply_text("ð Ù¾Ø±ÙÚÙ Ú©Ø§Ø± Ø±Ø§ Ø§ÙØªØ®Ø§Ø¨ Ú©Ù:", reply_markup=project_keyboard())
+        return
+
+    if data.startswith("new_project:"):
+        project = data.split(":", 1)[1]
+        context.user_data["new_project"] = project
+        context.user_data["state"] = "waiting_new_title"
+        await query.message.reply_text(f"Ù¾Ø±ÙÚÙ: {project}\nØ¹ÙÙØ§Ù Ú©Ø§Ø± Ø±Ø§ Ø¨ÙÙÛØ³:", reply_markup=back_keyboard())
+        return
+
+    if data.startswith("tasks:page:"):
+        page = int(data.split(":")[-1])
+        await show_task_list(query, context, page=page, edit=True)
+        return
+
+    if data.startswith("summary:"):
+        mode = data.split(":", 1)[1]
+        await query.message.reply_text("ð§  Ø¯Ø± Ø­Ø§Ù ØªØ­ÙÛÙâ¦")
+        await send_chat_summary_from_chat(query.message, context, mode)
+        return
+
+    if data.startswith("task:"):
+        parts = data.split(":")
+        action = parts[1]
+        task_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        if action == "open" and task_id:
+            await open_task_menu(query, task_id)
+            return
+        if not task_id:
+            await query.message.reply_text("â Ø´ÙØ§Ø±Ù Ú©Ø§Ø± ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª.")
+            return
+        task = get_task(task_id)
+        if not task:
+            await query.message.reply_text("â Ú©Ø§Ø± Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+            return
+
+        if action == "status":
+            status = parts[3]
+            old = task.get("status")
+            update_task_field(task_id, "status", status)
+            if status == "done":
+                update_task_field(task_id, "completed_at", now_str())
+            add_history(task_id, query.from_user.id, query.from_user.full_name, "status", old, status)
+            add_task_note(task_id, query.from_user.id, query.from_user.full_name, f"ÙØ¶Ø¹ÛØª ØªØºÛÛØ± Ú©Ø±Ø¯: {STATUSES.get(old, old)} â {STATUSES.get(status, status)}", "button")
+            await open_task_menu(query, task_id)
+            return
+
+        if action == "notes":
+            notes = get_task_notes(task_id, 20)
+            text = f"ð Ø´Ø±Ø­âÙØ§Û Ú©Ø§Ø± #{task_id}\n\n"
+            text += "Ø´Ø±Ø­Û Ø«Ø¨Øª ÙØ´Ø¯Ù." if not notes else "\n\n".join([f"{n['created_at']} | {n['full_name']}:\n{n['note']}" for n in notes])
+            await query.message.reply_text(text)
+            return
+
+        if action == "add_note":
+            context.user_data["state"] = "waiting_note"
+            context.user_data["task_id"] = task_id
+            await query.message.reply_text("Ø´Ø±Ø­ Ø±Ø§ Ø¨ÙÙÛØ³:", reply_markup=back_keyboard())
+            return
+
+        if action == "checklist":
+            rows = get_checklist(task_id)
+            if not rows:
+                await query.message.reply_text("âï¸ ÚÚ©âÙÛØ³ØªÛ Ø«Ø¨Øª ÙØ´Ø¯Ù.")
+                return
+            kb = []
+            lines = [f"âï¸ ÚÚ©âÙÛØ³Øª Ú©Ø§Ø± #{task_id}"]
+            for r in rows:
+                mark = "â" if r.get("is_done") else "â"
+                lines.append(f"{mark} #{r['id']} {r['item_text']}")
+                kb.append([InlineKeyboardButton(f"ØªØºÛÛØ± #{r['id']}", callback_data=f"check:toggle:{r['id']}:{task_id}")])
+            await query.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+            return
+
+        if action == "add_check":
+            context.user_data["state"] = "waiting_check"
+            context.user_data["task_id"] = task_id
+            await query.message.reply_text("Ø¢ÛØªÙ ÚÚ©âÙÛØ³Øª Ø±Ø§ Ø¨ÙÙÛØ³:", reply_markup=back_keyboard())
+            return
+
+        if action == "files":
+            rows = get_task_files(task_id)
+            text = f"ð ÙØ§ÛÙâÙØ§Û Ú©Ø§Ø± #{task_id}\n\n"
+            if not rows:
+                text += "ÙØ§ÛÙÛ Ø«Ø¨Øª ÙØ´Ø¯Ù. Ø±ÙÛ Ù¾ÛØ§Ù ÙÙÙÛ ÙÙÛÙ Ú©Ø§Ø± Reply Ú©Ù Ù Ø¹Ú©Ø³/ÙØ§ÛÙ Ø¨ÙØ±Ø³Øª."
+            else:
+                text += "\n".join([f"#{r['id']} | {r['created_at']} | {r['file_type']} | {r.get('caption') or '-'}" for r in rows])
+            await query.message.reply_text(text)
+            return
+
+        if action == "history":
+            rows = get_task_history(task_id, 30)
+            text = f"ð§¾ ØªØ§Ø±ÛØ®ÚÙ Ú©Ø§Ø± #{task_id}\n\n"
+            text += "ØªØ§Ø±ÛØ®ÚÙâØ§Û Ø«Ø¨Øª ÙØ´Ø¯Ù." if not rows else "\n".join([f"{r['created_at']} | {r['full_name']} | {r['action']}: {r['old_value']} â {r['new_value']}" for r in rows])
+            await query.message.reply_text(text)
+            return
+
+        if action == "pin":
+            new_val = 0 if task.get("pinned") else 1
+            update_task_field(task_id, "pinned", new_val)
+            add_history(task_id, query.from_user.id, query.from_user.full_name, "pin", task.get("pinned"), new_val)
+            await open_task_menu(query, task_id)
+            return
+
+        if action == "remind":
+            context.user_data["state"] = "waiting_remind"
+            context.user_data["task_id"] = task_id
+            await query.message.reply_text("Ø²ÙØ§Ù ÛØ§Ø¯Ø¢ÙØ±Û Ø±Ø§ Ø¨ÙÙÛØ³. ÙØ«Ø§Ù:\n2026-06-25 18:00\nÛØ§: ÙØ±Ø¯Ø§ 10:00", reply_markup=back_keyboard())
+            return
+
+        if action == "delete":
+            update_task_field(task_id, "deleted", 1)
+            update_task_field(task_id, "status", "cancelled")
+            add_history(task_id, query.from_user.id, query.from_user.full_name, "delete", "", "deleted")
+            await show_task_list(query, context, edit=True)
+            return
+
+    if data.startswith("check:toggle:"):
+        _, _, item_id, task_id = data.split(":")
+        toggle_checklist_item(int(item_id))
+        add_history(int(task_id), query.from_user.id, query.from_user.full_name, "toggle_checklist", item_id, "")
+        await query.message.reply_text("â ØªØºÛÛØ± Ú©Ø±Ø¯")
+        return
+
+    if data.startswith("advice:show:"):
+        sid = int(data.split(":")[-1])
+        row = get_ai_suggestion(sid)
+        if not row:
+            await query.message.reply_text("Ú©Ø§ÙÙØª Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+            return
+        update_ai_suggestion_status(sid, "shown", query.from_user.id)
+        await query.message.reply_text(f"ð§  Ú©Ø§ÙÙØª ÙØ¯ÛØ±ÛØªÛ:\n\n{row.get('note') or row.get('reason') or '-'}")
+        return
+
+    if data.startswith("advice:reject:"):
+        sid = int(data.split(":")[-1])
+        update_ai_suggestion_status(sid, "rejected", query.from_user.id)
+        await query.message.reply_text("â Ø±Ø¯ Ø´Ø¯")
+        return
+
+# ------------------------- text and file routers -------------------------
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
     await register_user(update)
-    v53_clear_states(context)
-    text = (update.message.text or "").strip()
-    v53_save_chat(update)
+    text = normalize_text(update.message.text)
+    reply_id = update.message.reply_to_message.message_id if update.message.reply_to_message else None
+    save_chat_message(update.effective_chat.id, user_id(update), user_name(update), update.effective_user.username or "", text, update.message.message_id, reply_id)
 
-    if text in ["📋 کارها", "لیست کارها", "کارها", "⏱ پیگیری"]:
-        await v53_send_list(update, context)
-    if text in ["➕ کار جدید", "کار جدید"]:
-        await update.message.reply_text("بنویس: کار جدید: عنوان کار")
-        raise ApplicationHandlerStop
-    if text in ["🧠 مدیر هوشمند", "مدیر هوشمند"]:
-        await v53_smart_cmd(update, context)
-    if text in ["📤 خروجی اکسل"]:
-        await v53_export_excel(update, context)
-    if text in ["🧠 تحلیل چت", "تحلیل چت"]:
-        await update.message.reply_text(
-            "🧠 بازه تحلیل چت را انتخاب کن:",
-            reply_markup=ReplyKeyboardMarkup([["⏱ یک ساعت اخیر", "⏱ دو ساعت اخیر"], ["📅 دیروز", "📊 ۷ روز اخیر"], ["⬅️بازگشت"]], resize_keyboard=True)
-        )
-        raise ApplicationHandlerStop
-    if text == "⏱ یک ساعت اخیر":
-        await summary_command(update, context, "1h"); raise ApplicationHandlerStop
-    if text == "⏱ دو ساعت اخیر":
-        await summary_command(update, context, "2h"); raise ApplicationHandlerStop
-    if text == "📅 دیروز":
-        await summary_command(update, context, "yesterday"); raise ApplicationHandlerStop
-    if text == "📊 ۷ روز اخیر":
-        await summary_command(update, context, "7d"); raise ApplicationHandlerStop
-    if text in ["📊 گزارش‌ها", "گزارش‌ها"]:
-        await update.message.reply_text("📊 گزارش‌ها", reply_markup=ReplyKeyboardMarkup([["📊 آمار", "📅 گزارش روزانه"], ["📤 خروجی اکسل", "📄 خروجی PDF"], ["⬅️بازگشت"]], resize_keyboard=True))
-        raise ApplicationHandlerStop
-    if text == "📊 آمار":
-        await stats(update, context); raise ApplicationHandlerStop
-    if text == "📅 گزارش روزانه":
-        await daily_report_command(update, context); raise ApplicationHandlerStop
-    if text == "📄 خروجی PDF":
-        await v5_export_pdf_cmd(update, context); raise ApplicationHandlerStop
-    if text in ["👥 اعضا", "اعضا"]:
-        await members(update, context); raise ApplicationHandlerStop
-    if text in ["👤 پروفایل", "پروفایل"]:
-        await whoami(update, context); raise ApplicationHandlerStop
-    if text in ["❓ راهنما", "راهنما"]:
-        await v53_help(update, context)
-    if text in ["🎙 فرمان صوتی", "فرمان صوتی"]:
-        await update.message.reply_text("🎙 ویس بفرست. مثال: لیست کارها / کار 1 انجام شد / کار جدید پیگیری مالی")
-        raise ApplicationHandlerStop
-    if text in ["🤖 دستیار هوشمند", "دستیار هوشمند"]:
-        USER_STATE[update.effective_user.id] = "ai_mode"
-        await update.message.reply_text("🤖 دستیار فعال شد. سوالت را بنویس. برای خروج /exit")
-        raise ApplicationHandlerStop
-    if USER_STATE.get(update.effective_user.id) == "ai_mode" and text not in ["/exit"]:
-        await ai_chat(update, context); raise ApplicationHandlerStop
-    if text in ["⬅️بازگشت", "بازگشت"]:
-        await v53_start(update, context)
+    if is_back(text):
+        clear_user_states(context, user_id(update))
+        await update.message.reply_text("â Ø¨Ø§Ø²Ú¯Ø´Øª", reply_markup=main_keyboard())
+        return
 
-    rid = update.message.reply_to_message.message_id if update.message.reply_to_message else None
-    if rid:
-        tid = v5_task_by_msg(update.effective_chat.id, rid)
-        if tid:
-            await v53_add_note(update, tid, text, "reply")
+    state = context.user_data.get("state")
+    if state == "waiting_new_title":
+        project = context.user_data.get("new_project") or detect_project(text)
+        clear_user_states(context, user_id(update))
+        await create_task_silent(update, context, text, project=project)
+        return
 
-    m = re.search(r"کار\s*([0-9۰-۹٠-٩]+)\s*[:：\-]\s*(.+)", text)
+    if state == "waiting_note":
+        task_id = int(context.user_data.get("task_id"))
+        clear_user_states(context, user_id(update))
+        await add_note_and_reply(update, task_id, text, "button")
+        return
+
+    if state == "waiting_check":
+        task_id = int(context.user_data.get("task_id"))
+        clear_user_states(context, user_id(update))
+        add_checklist_item(task_id, text, user_id(update))
+        add_history(task_id, user_id(update), user_name(update), "add_checklist", "", text)
+        await update.message.reply_text("â Ø«Ø¨Øª Ø´Ø¯", reply_markup=main_keyboard())
+        return
+
+    if state == "waiting_remind":
+        task_id = int(context.user_data.get("task_id"))
+        dt, repeat = parse_datetime_text(text)
+        if dt is None:
+            await update.message.reply_text("â ÙØ±ÙØª Ø²ÙØ§Ù Ø§Ø´ØªØ¨Ø§Ù Ø§Ø³Øª. ÙØ«Ø§Ù:\n2026-06-25 18:00\nÛØ§: ÙØ±Ø¯Ø§ 10:00")
+            return
+        clear_user_states(context, user_id(update))
+        old = get_task(task_id).get("reminder_time") if get_task(task_id) else ""
+        update_task_field(task_id, "reminder_time", dt)
+        update_task_field(task_id, "reminder_repeat", repeat)
+        add_history(task_id, user_id(update), user_name(update), "reminder", old, f"{dt} / {repeat}")
+        await update.message.reply_text("â ØªÙØ¸ÛÙ Ø´Ø¯", reply_markup=main_keyboard())
+        return
+
+    if USER_STATE.get(user_id(update)) == "ai":
+        await ai_chat_reply(update, context, text)
+        return
+
+    # Reply to task menu/message adds note.
+    if reply_id:
+        task_id = get_task_id_by_message(update.effective_chat.id, reply_id)
+        if task_id:
+            await add_note_and_reply(update, task_id, text, "reply")
+            return
+
+    # Keyboard buttons and Persian aliases.
+    if text in ["â Ú©Ø§Ø± Ø¬Ø¯ÛØ¯", "Ú©Ø§Ø± Ø¬Ø¯ÛØ¯", "Ø§ÛØ¬Ø§Ø¯ Ú©Ø§Ø±", "Ø³Ø§Ø®Øª Ú©Ø§Ø±"]:
+        await newtask_command(update, context)
+        return
+    if text in ["ð Ú©Ø§Ø±ÙØ§", "Ú©Ø§Ø±ÙØ§", "ÙÛØ³Øª Ú©Ø§Ø±ÙØ§", "Ù¾ÛÚ¯ÛØ±Û", "â± Ù¾ÛÚ¯ÛØ±Û"]:
+        await tasks_command(update, context)
+        return
+    if text in ["ð§  ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯", "ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯"]:
+        await smart_command(update, context)
+        return
+    if text in ["ð§  ØªØ­ÙÛÙ ÚØª", "ØªØ­ÙÛÙ ÚØª", "Ø®ÙØ§ØµÙ ÚØª"]:
+        await summary_command(update, context)
+        return
+    if text in ["ð ÙØ±ÙØ§Ù ØµÙØªÛ", "ÙØ±ÙØ§Ù ØµÙØªÛ", "ÙÛØ³"]:
+        await update.message.reply_text("ð ÙÛØ³ Ø¨ÙØ±Ø³Øª. ÙÙ Ø§ÙÙ ØªØ¨Ø¯ÛÙ Ø¨Ù ÙØªÙ ÙÛâÚ©ÙÙØ Ø¨Ø¹Ø¯ ÙÙØ· Ø§Ú¯Ø± ÙØ±ÙØ§Ù ÙØ§Ø¶Ø­ Ø¨Ø§Ø´Ø¯ Ø§Ø¬Ø±Ø§ ÙÛâÚ©ÙÙ.")
+        return
+    if text in ["ð Ú¯Ø²Ø§Ø±Ø´âÙØ§", "Ú¯Ø²Ø§Ø±Ø´âÙØ§"]:
+        await update.message.reply_text("ð Ú¯Ø²Ø§Ø±Ø´âÙØ§", reply_markup=reports_keyboard())
+        return
+    if text in ["ð Ø¢ÙØ§Ø±", "Ø¢ÙØ§Ø±"]:
+        await stats_command(update, context)
+        return
+    if text in ["ð Ú¯Ø²Ø§Ø±Ø´ Ø±ÙØ²Ø§ÙÙ", "Ú¯Ø²Ø§Ø±Ø´ Ø±ÙØ²Ø§ÙÙ"]:
+        await daily_report_command(update, context)
+        return
+    if text in ["ð Ú¯Ø²Ø§Ø±Ø´ ÙÙØªÚ¯Û", "Ú¯Ø²Ø§Ø±Ø´ ÙÙØªÚ¯Û"]:
+        await weekly_report_command(update, context)
+        return
+    if text in ["ð¥ Ø®Ø±ÙØ¬Û Ø§Ú©Ø³Ù", "Ø®Ø±ÙØ¬Û Ø§Ú©Ø³Ù", "Ø§Ú©Ø³Ù"]:
+        await export_excel_command(update, context)
+        return
+    if text in ["ð Ø®Ø±ÙØ¬Û PDF", "Ø®Ø±ÙØ¬Û PDF", "PDF", "pdf"]:
+        await export_pdf_command(update, context)
+        return
+    if text in ["ð¥ Ø§Ø¹Ø¶Ø§", "Ø§Ø¹Ø¶Ø§"]:
+        await members(update, context)
+        return
+    if text in ["ð¤ Ù¾Ø±ÙÙØ§ÛÙ", "Ù¾Ø±ÙÙØ§ÛÙ"]:
+        await whoami(update, context)
+        return
+    if text in ["â Ø±Ø§ÙÙÙØ§", "Ø±Ø§ÙÙÙØ§", "Ú©ÙÚ©"]:
+        await help_command(update, context)
+        return
+
+    if text in ["Û± Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±", "ÛÚ© Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±"]:
+        await send_chat_summary(update, context, "1h")
+        return
+    if text in ["Û² Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±", "Ø¯Ù Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±"]:
+        await send_chat_summary(update, context, "2h")
+        return
+    if text == "Ø¯ÛØ±ÙØ²":
+        await send_chat_summary(update, context, "yesterday")
+        return
+    if text in ["Û· Ø±ÙØ² Ø§Ø®ÛØ±", "7 Ø±ÙØ² Ø§Ø®ÛØ±"]:
+        await send_chat_summary(update, context, "7d")
+        return
+
+    # Structured text patterns.
+    m = re.search(r"Ú©Ø§Ø±\s*([0-9Û°-Û¹Ù -Ù©]+)\s*[:ï¼-]\s*(.+)", text)
     if m:
-        await v53_add_note(update, int(fa_to_en_digits(m.group(1))), m.group(2).strip(), "text_note")
+        task_id = int(fa_to_en_digits(m.group(1)))
+        await add_note_and_reply(update, task_id, m.group(2), "pattern")
+        return
 
-    st = v53_status_from_text(text)
-    if st and ("کار" in text or "#" in text):
-        task = v53_find_task(text)
-        await v53_set_status(update, task, st)
+    m = re.search(r"Ú©Ø§Ø±\s*([0-9Û°-Û¹Ù -Ù©]+).*(Ø§ÙØ¬Ø§Ù|ØªÙØ§Ù|ÙØºÙ|Ú©ÙØ³Ù|ÙÙØªØ¸Ø±|Ù¾ÛÚ¯ÛØ±Û|Ø¯Ø± Ø­Ø§Ù)", text)
+    if m:
+        task_id = int(fa_to_en_digits(m.group(1)))
+        status = detect_status_from_text(text) or "in_progress"
+        await set_status_and_reply(update, task_id, status)
+        return
 
-    if text.startswith(("کار جدید", "تسک جدید", "وظیفه جدید", "ثبت کار")):
-        raw = re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید|ثبت کار)\s*[:：\-]?\s*", "", text).strip()
-        await v53_create_from_text(update, context, raw)
+    if re.match(r"^(Ú©Ø§Ø± Ø¬Ø¯ÛØ¯|Ø§ÛØ¬Ø§Ø¯ Ú©Ø§Ø±|Ø³Ø§Ø®Øª Ú©Ø§Ø±|ØªØ³Ú© Ø¬Ø¯ÛØ¯|ÙØ¸ÛÙÙ Ø¬Ø¯ÛØ¯)\s*[:ï¼-]\s*", text):
+        raw = re.sub(r"^(Ú©Ø§Ø± Ø¬Ø¯ÛØ¯|Ø§ÛØ¬Ø§Ø¯ Ú©Ø§Ø±|Ø³Ø§Ø®Øª Ú©Ø§Ø±|ØªØ³Ú© Ø¬Ø¯ÛØ¯|ÙØ¸ÛÙÙ Ø¬Ø¯ÛØ¯)\s*[:ï¼-]\s*", "", text).strip()
+        await create_task_silent(update, context, raw)
+        return
 
-    # پیام معمولی فقط ذخیره شود و وارد هندلرهای قدیمی نشود تا خطای زمان ندهد.
-    raise ApplicationHandlerStop
+    # No answer to random group text. It is only stored for smart analysis.
 
 
-async def v53_voice_handler(update, context):
+async def file_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     await register_user(update)
-    v53_clear_states(context)
-    if not v53_has_openai_key():
-        await update.message.reply_text("❌ OPENAI_API_KEY تنظیم نشده")
-        raise ApplicationHandlerStop
+    reply_id = update.message.reply_to_message.message_id if update.message.reply_to_message else None
+    if not reply_id:
+        await update.message.reply_text("Ø¨Ø±Ø§Û Ø°Ø®ÛØ±Ù ÙØ§ÛÙØ Ø±ÙÛ ÙÙÙÛ ÙÙØ§Ù Ú©Ø§Ø± Reply Ú©Ù Ù ÙØ§ÛÙ/Ø¹Ú©Ø³ Ø¨ÙØ±Ø³Øª.")
+        return
+    task_id = get_task_id_by_message(update.effective_chat.id, reply_id)
+    if not task_id:
+        await update.message.reply_text("Ø§ÛÙ Ù¾ÛØ§Ù Ø¨Ù Ú©Ø§Ø± Ø®Ø§ØµÛ ÙØµÙ ÙÛØ³Øª.")
+        return
+    file_id = None
+    file_type = None
+    if update.message.document:
+        file_id = update.message.document.file_id
+        file_type = "document"
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        file_type = "photo"
+    elif update.message.video:
+        file_id = update.message.video.file_id
+        file_type = "video"
+    elif update.message.audio:
+        file_id = update.message.audio.file_id
+        file_type = "audio"
+    if not file_id:
+        return
+    caption = update.message.caption or ""
+    add_task_file(task_id, user_id(update), user_name(update), file_id, file_type, caption)
+    add_history(task_id, user_id(update), user_name(update), "add_file", "", file_type)
+    if caption:
+        add_task_note(task_id, user_id(update), user_name(update), caption, "file_caption", update.message.message_id)
+    await update.message.reply_text("â ÙØ§ÛÙ Ø°Ø®ÛØ±Ù Ø´Ø¯")
+
+# ------------------------- voice -------------------------
+
+async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await register_user(update)
+    if not client:
+        await update.message.reply_text("OPENAI_API_KEY ØªÙØ¸ÛÙ ÙØ´Ø¯Ù.")
+        return
     try:
         file = await context.bot.get_file(update.message.voice.file_id)
         path = tempfile.mktemp(suffix=".ogg")
         await file.download_to_drive(path)
         with open(path, "rb") as f:
-            tr = client.audio.transcriptions.create(model=v53_transcribe_model(), file=f)
-        text = (tr.text or "").strip()
+            tr = client.audio.transcriptions.create(model=TRANSCRIBE_MODEL, file=f)
+        text = normalize_text(tr.text)
     except Exception as e:
-        await update.message.reply_text(f"❌ خطای تبدیل ویس: {e}")
-        raise ApplicationHandlerStop
-
-    await update.message.reply_text(f"📝 متن ویس:\n{text}")
-    # فرمان صوتی فقط وقتی صریح باشد کار جدید می‌سازد.
-    if any(w in text for w in ["لیست", "کارها رو", "کارها را", "کارها"]):
-        await v53_send_list(update, context, "📋 لیست کارها")
-    st = v53_status_from_text(text)
-    if st and "کار" in text:
-        task = v53_find_task(text)
-        await v53_set_status(update, task, st)
-    if "مدیر هوشمند" in text or "تحلیل" in text:
-        await v53_smart_cmd(update, context)
-    if any(w in text for w in ["کار جدید", "بساز", "ایجاد کن", "ثبت کن"]):
-        await v53_create_from_text(update, context, text)
-    task = v53_find_task(text)
-    if task and len(text) > 5:
-        await v53_add_note(update, task['id'], text, "voice_note")
-    await update.message.reply_text("فرمان مشخص نبود. برای ساخت کار بگو: کار جدید ... / برای وضعیت بگو: کار 1 انجام شد")
-    raise ApplicationHandlerStop
-
-
-async def v53_file_handler(update, context):
-    if not update.message:
+        await update.message.reply_text(f"â Ø®Ø·Ø§Û ØªØ¨Ø¯ÛÙ ÙÛØ³: {e}")
         return
-    await register_user(update)
-    rid = update.message.reply_to_message.message_id if update.message.reply_to_message else None
-    if not rid:
-        await update.message.reply_text("برای ذخیره فایل، روی پیام همان کار Reply کن و عکس/فایل را بفرست.")
-        raise ApplicationHandlerStop
-    tid = v5_task_by_msg(update.effective_chat.id, rid)
-    if not tid:
-        await update.message.reply_text("این پیام به کاری وصل نیست.")
-        raise ApplicationHandlerStop
-    file_id = file_type = None
-    if update.message.document:
-        file_id = update.message.document.file_id; file_type = "document"
-    elif update.message.photo:
-        file_id = update.message.photo[-1].file_id; file_type = "photo"
-    elif update.message.video:
-        file_id = update.message.video.file_id; file_type = "video"
-    elif update.message.audio:
-        file_id = update.message.audio.file_id; file_type = "audio"
-    if file_id:
-        conn = v5_conn(); cur = conn.cursor()
-        cur.execute("INSERT INTO task_files (task_id,user_id,full_name,file_id,file_type,caption,created_at) VALUES (?,?,?,?,?,?,?)", (tid, update.effective_user.id, update.effective_user.full_name, file_id, file_type, update.message.caption or "", v5_now()))
-        conn.commit(); conn.close()
-        v5_history(tid, update.effective_user.id, update.effective_user.full_name, "add_file", "", file_type)
-        await update.message.reply_text("✅ فایل ثبت شد")
-    raise ApplicationHandlerStop
+    await update.message.reply_text(f"ð ÙØªÙ ÙÛØ³:\n{text}")
+    await handle_voice_text(update, context, text)
 
 
-async def v53_callback(update, context):
-    q = update.callback_query
-    await q.answer()
-    parts = q.data.split(":")
-    if parts[0] != "v53":
+async def handle_voice_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    t = normalize_text(text)
+    if any(w in t for w in ["ÙÛØ³Øª Ú©Ø§Ø±", "Ú©Ø§Ø±ÙØ§ Ø±Ù", "Ú©Ø§Ø±ÙØ§ Ø±Ø§", "Ú©Ø§Ø±ÙØ§Û Ø¨Ø§Ø²"]):
+        await tasks_command(update, context)
         return
-    action = parts[1]
-    if action == "none":
+    if any(w in t for w in ["ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯", "ØªØ­ÙÛÙ ÙÙØ´ÙÙØ¯"]):
+        await smart_command(update, context)
         return
-    if action == "list":
-        await q.edit_message_text("📋 کارهای باز\n\nروی هر کار بزن تا منوی همان کار باز شود.", reply_markup=v53_list_keyboard())
-        raise ApplicationHandlerStop
-    if action == "open":
-        task_id = int(parts[2])
-        t = v5_task(task_id)
-        if not t:
-            await q.edit_message_text("❌ کار پیدا نشد")
+    if any(w in t for w in ["Ú¯Ø²Ø§Ø±Ø´", "Ø¢ÙØ§Ø±"]):
+        await stats_command(update, context)
+        return
+    m = re.search(r"Ú©Ø§Ø±\s*([0-9Û°-Û¹Ù -Ù©]+).*(Ø§ÙØ¬Ø§Ù|ØªÙØ§Ù|ÙØºÙ|ÙÙØªØ¸Ø±|Ù¾ÛÚ¯ÛØ±Û|Ø¯Ø± Ø­Ø§Ù)", t)
+    if m:
+        task_id = int(fa_to_en_digits(m.group(1)))
+        status = detect_status_from_text(t) or "in_progress"
+        await set_status_and_reply(update, task_id, status)
+        return
+    m = re.search(r"Ú©Ø§Ø±\s*([0-9Û°-Û¹Ù -Ù©]+)\s*[:ï¼-]?\s*(.+)", t)
+    if m and any(w in t for w in ["Ø²ÙÚ¯", "Ø¬ÙØ§Ø¨", "Ú¯ÙØª", "ÙØ±Ø³ØªØ§Ø¯Ù", "Ù¾ÛÚ¯ÛØ±Û"]):
+        task_id = int(fa_to_en_digits(m.group(1)))
+        await add_note_and_reply(update, task_id, m.group(2), "voice")
+        return
+    if any(w in t for w in ["Ú©Ø§Ø± Ø¬Ø¯ÛØ¯", "ØªØ³Ú© Ø¬Ø¯ÛØ¯", "ÙØ¸ÛÙÙ Ø¬Ø¯ÛØ¯"]):
+        raw = re.sub(r".*?(Ú©Ø§Ø± Ø¬Ø¯ÛØ¯|ØªØ³Ú© Ø¬Ø¯ÛØ¯|ÙØ¸ÛÙÙ Ø¬Ø¯ÛØ¯)", "", t).strip(" :Ø-")
+        if raw:
+            await create_task_silent(update, context, raw)
+            return
+    await update.message.reply_text("ÙØ±ÙØ§Ù ÙØ§Ø¶Ø­ ÙØ¨ÙØ¯. ÚÛØ²Û Ø§Ø¬Ø±Ø§ ÙØ´Ø¯.")
+
+# ------------------------- AI -------------------------
+
+def extract_json(text: str) -> Dict[str, Any]:
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except Exception:
+            pass
+    return {}
+
+
+async def ai_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    if not client:
+        await update.message.reply_text("OPENAI_API_KEY ØªÙØ¸ÛÙ ÙØ´Ø¯Ù.")
+        return
+    try:
+        res = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "ØªÙ Ø¯Ø³ØªÛØ§Ø± ÙØ¯ÛØ±ÛØªÛ ÙØ§Ø±Ø³Û Ø¨Ø±Ø§Û ØªÛÙ ÙØ³ØªÛ. Ú©ÙØªØ§ÙØ Ø¹ÙÙÛ Ù Ø¯ÙÛÙ Ø¬ÙØ§Ø¨ Ø¨Ø¯Ù."},
+                {"role": "user", "content": text},
+            ],
+        )
+        await update.message.reply_text(res.choices[0].message.content[:3500])
+    except Exception as e:
+        await update.message.reply_text(f"â Ø®Ø·Ø§Û Ø¯Ø³ØªÛØ§Ø±: {e}")
+
+
+async def send_chat_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
+    await send_chat_summary_from_chat(update.message, context, mode)
+
+
+async def send_chat_summary_from_chat(message, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
+    if not client:
+        await message.reply_text("OPENAI_API_KEY ØªÙØ¸ÛÙ ÙØ´Ø¯Ù.")
+        return
+    end = datetime.now()
+    start = end - timedelta(hours=1)
+    if mode in ["2h", "Ø¯Ù", "2"]:
+        start = end - timedelta(hours=2)
+    elif mode in ["yesterday", "Ø¯ÛØ±ÙØ²"]:
+        y = end - timedelta(days=1)
+        start = y.replace(hour=0, minute=0, second=0)
+        end = y.replace(hour=23, minute=59, second=59)
+    elif mode in ["7d", "ÙÙØªÙ", "7"]:
+        start = end - timedelta(days=7)
+    rows = get_chat_messages_between(message.chat_id, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"))
+    if not rows:
+        await message.reply_text("Ø¯Ø± Ø§ÛÙ Ø¨Ø§Ø²Ù Ù¾ÛØ§ÙÛ Ø¨Ø±Ø§Û ØªØ­ÙÛÙ Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+    history = "\n".join([f"{r['created_at']} | {r['full_name']}: {r['text']}" for r in rows[-100:]])
+    try:
+        res = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "Ø®ÙØ§ØµÙâØ³Ø§Ø² Ù ØªØ­ÙÛÙâÚ¯Ø± ÙØ¯ÛØ±ÛØªÛ ÙØ§Ø±Ø³Û ÙØ³ØªÛ."},
+                {"role": "user", "content": f"Ø§ÛÙ ÚØª Ø±Ø§ Ø®ÙØ§ØµÙ Ú©Ù Ù Ú©Ø§Ø±ÙØ§Û ÙØ§Ø¨Ù Ù¾ÛÚ¯ÛØ±ÛØ ØªØµÙÛÙâÙØ§Ø Ø±ÛØ³Ú©âÙØ§ Ù Ø§Ø´ØªØ¨Ø§ÙØ§Øª Ø¨Ø±ÙØ§ÙÙâØ±ÛØ²Û Ø±Ø§ Ø¨Ú¯Ù:\n\n{history}"},
+            ],
+        )
+        await message.reply_text(res.choices[0].message.content[:3900])
+    except Exception as e:
+        await message.reply_text(f"â Ø®Ø·Ø§Û ØªØ­ÙÛÙ: {e}")
+
+
+async def run_smart_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, progress_message=None) -> None:
+    if not client:
+        text = "OPENAI_API_KEY ØªÙØ¸ÛÙ ÙØ´Ø¯Ù."
+        if progress_message:
+            await progress_message.edit_text(text)
         else:
-            await q.edit_message_text(v53_task_text(t), reply_markup=v53_task_menu(task_id))
-        raise ApplicationHandlerStop
-    if action == "status":
-        task_id = int(parts[2]); status = parts[3]
-        t = v5_task(task_id)
-        if t:
-            v5_update(task_id, "status", status)
+            await update.message.reply_text(text)
+        return
+
+    chat_id = update.effective_chat.id
+    messages = get_recent_chat_messages(chat_id, 80)
+    tasks = get_open_tasks(80)
+    if not messages:
+        await progress_message.edit_text("Ù¾ÛØ§ÙÛ Ø¨Ø±Ø§Û ØªØ­ÙÛÙ Ù¾ÛØ¯Ø§ ÙØ´Ø¯.")
+        return
+
+    chat_text = "\n".join([f"{m['created_at']} | {m['full_name']}: {m['text']}" for m in messages[-80:]])
+    task_text = "\n".join([f"#{t['id']} | {t['title']} | {STATUSES.get(t['status'], t['status'])} | Ù¾Ø±ÙÚÙ:{t.get('project')} | Ø§ÙÙÙÛØª:{t.get('priority')}" for t in tasks]) or "Ú©Ø§Ø± Ø¨Ø§Ø²Û ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯."
+    prompt = f"""
+ØªÙ ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯ ØªÛÙ ÙØ³ØªÛ. ÚØª Ù Ú©Ø§Ø±ÙØ§Û Ø¨Ø§Ø² Ø±Ø§ ØªØ­ÙÛÙ Ú©Ù.
+Ø®Ø±ÙØ¬Û ÙÙØ· JSON ÙØ¹ØªØ¨Ø± Ø¨Ø§Ø´Ø¯.
+ÙØ± Ø¬Ø§ ÙØ·ÙØ¦Ù ÙØ³ØªÛØ action Ø¨Ø¯Ù ØªØ§ Ø±Ø¨Ø§Øª Ø§Ø¹ÙØ§Ù Ú©ÙØ¯.
+Ø¨Ø±Ø§Û ÙØ´ÙØ±Øª ÙØ¯ÛØ±ÛØªÛØ action Ø±Ø§ advice Ø¨Ú¯Ø°Ø§Ø±. advice Ø±Ø§ ÙØ³ØªÙÛÙ Ø§ÙØ´Ø§ ÙÙÛâÚ©ÙÛÙ Ù Ø§ÙÙ Ø§Ø¬Ø§Ø²Ù ÙÛâÚ¯ÛØ±ÛÙ.
+
+JSON format:
+{{
+  "applied": [
+    {{
+      "action": "new_task | add_note | change_status",
+      "task_id": 1,
+      "title": "Ø¹ÙÙØ§Ù Ú©Ø§Ø± Ø¬Ø¯ÛØ¯",
+      "note": "Ø´Ø±Ø­ Ø¨Ø±Ø§Û Ú©Ø§Ø± ÛØ§ Ø¯ÙÛÙ",
+      "new_status": "pending | in_progress | waiting | done | cancelled",
+      "project": "ØªØ®ØªÙ | ÙÛÙÙ | Ù¾ØªØ±ÙØ´ÛÙÛ | ÙØ§ÙÛ | ØºÙØ§Øª | ØºÛØ±Ù",
+      "priority": "ÙÙØ±Û | Ø²ÛØ§Ø¯ | ÙØªÙØ³Ø· | Ú©Ù",
+      "confidence": 0.0
+    }}
+  ],
+  "advice": [
+    {{"note": "Ø§Ø´ØªØ¨Ø§ÙØ§Øª Ø¨Ø±ÙØ§ÙÙâØ±ÛØ²ÛØ Ø±ÛØ³Ú©âÙØ§Ø Ù¾ÛØ´ÙÙØ§Ø¯ ÙØ¯ÛØ±ÛØªÛ", "confidence": 0.0}}
+  ]
+}}
+
+Ú©Ø§Ø±ÙØ§Û Ø¨Ø§Ø²:
+{task_text}
+
+ÚØª Ø§Ø®ÛØ±:
+{chat_text}
+"""
+    try:
+        res = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "ÙÙØ· JSON ÙØ¹ØªØ¨Ø± Ø¨Ø¯Ù. ØªÙØ¶ÛØ­ Ø®Ø§Ø±Ø¬ JSON ÙÙÙÛØ³."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        data = extract_json(res.choices[0].message.content)
+    except Exception as e:
+        await progress_message.edit_text(f"â Ø®Ø·Ø§Û ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯: {e}")
+        return
+
+    applied_count = 0
+    new_count = 0
+    note_count = 0
+    status_count = 0
+    skipped_count = 0
+
+    for item in data.get("applied", [])[:12]:
+        try:
+            confidence = float(item.get("confidence", 0) or 0)
+        except Exception:
+            confidence = 0
+        if confidence < 0.60:
+            skipped_count += 1
+            continue
+        action = item.get("action")
+        project = item.get("project") if item.get("project") in PROJECTS else detect_project(str(item.get("title") or item.get("note") or ""))
+        priority = item.get("priority") if item.get("priority") in PRIORITIES else detect_priority(str(item.get("title") or item.get("note") or ""))
+
+        if action == "new_task":
+            title = normalize_text(str(item.get("title") or ""))
+            if not title:
+                continue
+            task_id = create_task(title=title, assigned_to=None, assigned_by=0, priority=priority, reminder_time="none", created_at=now_str(), description="Ø³Ø§Ø®ØªÙâØ´Ø¯Ù ØªÙØ³Ø· ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯", project=project)
+            add_history(task_id, 0, "AI", "ai_create", "", title)
+            if item.get("note"):
+                add_task_note(task_id, 0, "AI", str(item.get("note")), "ai")
+            applied_count += 1
+            new_count += 1
+        elif action == "add_note":
+            task_id = item.get("task_id")
+            if not task_id or not get_task(int(task_id)):
+                continue
+            note = normalize_text(str(item.get("note") or ""))
+            if not note:
+                continue
+            add_task_note(int(task_id), 0, "AI", note, "ai")
+            add_history(int(task_id), 0, "AI", "ai_note", "", note)
+            applied_count += 1
+            note_count += 1
+        elif action == "change_status":
+            task_id = item.get("task_id")
+            status = item.get("new_status")
+            if not task_id or status not in STATUSES or not get_task(int(task_id)):
+                continue
+            old = get_task(int(task_id)).get("status")
+            update_task_field(int(task_id), "status", status)
             if status == "done":
-                v5_update(task_id, "completed_at", v5_now())
-            v5_history(task_id, q.from_user.id, q.from_user.full_name, "status_button", t.get('status'), status)
-            if status in ["cancelled", "done"]:
-                await q.edit_message_text("✅ ثبت شد", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ لیست", callback_data="v53:list")]]))
-            else:
-                await q.edit_message_text(v53_task_text(v5_task(task_id)), reply_markup=v53_task_menu(task_id))
-        raise ApplicationHandlerStop
-    if action == "projectmenu":
-        task_id = int(parts[2])
-        await q.edit_message_text("📁 پروژه را انتخاب کن:", reply_markup=v53_project_keyboard(task_id))
-        raise ApplicationHandlerStop
-    if action == "setproject":
-        task_id = int(parts[2]); idx = int(parts[3])
-        project = V53_PROJECTS[idx]
-        v5_update(task_id, "project", project)
-        v5_history(task_id, q.from_user.id, q.from_user.full_name, "project", "", project)
-        await q.edit_message_text(v53_task_text(v5_task(task_id)), reply_markup=v53_task_menu(task_id))
-        raise ApplicationHandlerStop
-    if action == "notes":
-        task_id = int(parts[2])
-        rows = v5_notes(task_id, 20)
-        text = f"📝 شرح‌های کار #{task_id}\n\n" + ("شرحی ثبت نشده." if not rows else "\n\n".join(f"{r[0]} | {r[1]}:\n{r[2]}" for r in rows))
-        await q.message.reply_text(text)
-        raise ApplicationHandlerStop
-    if action == "history":
-        task_id = int(parts[2])
-        rows = v5_histories(task_id, 20)
-        text = f"🧾 تاریخچه کار #{task_id}\n\n" + ("تاریخچه‌ای ثبت نشده." if not rows else "\n".join(f"{r[0]} | {r[1]} | {r[2]}" for r in rows))
-        await q.message.reply_text(text)
-        raise ApplicationHandlerStop
-    if action == "files":
-        task_id = int(parts[2])
-        conn = v5_conn(); cur = conn.cursor()
-        cur.execute("SELECT id,created_at,full_name,file_type,caption FROM task_files WHERE task_id=? ORDER BY id DESC LIMIT 20", (task_id,))
-        rows = cur.fetchall(); conn.close()
-        text = f"📎 فایل‌های کار #{task_id}\n\n" + ("فایلی ثبت نشده. روی پیام کار Reply کن و عکس/فایل بفرست." if not rows else "\n".join(f"#{r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4] or '-'}" for r in rows))
-        await q.message.reply_text(text)
-        raise ApplicationHandlerStop
-    if action == "showadvice":
-        aid = int(parts[2])
-        row = v53_get_advice(aid)
-        if row:
-            await q.edit_message_text("🧠 کامنت مدیریتی:\n\n" + row[2])
-        raise ApplicationHandlerStop
+                update_task_field(int(task_id), "completed_at", now_str())
+            add_history(int(task_id), 0, "AI", "ai_status", old, status)
+            if item.get("note"):
+                add_task_note(int(task_id), 0, "AI", str(item.get("note")), "ai_status")
+            applied_count += 1
+            status_count += 1
+
+    advice_items = []
+    for adv in data.get("advice", [])[:3]:
+        try:
+            c = float(adv.get("confidence", 0) or 0)
+        except Exception:
+            c = 0
+        note = normalize_text(str(adv.get("note") or ""))
+        if note and c >= 0.55:
+            sid = save_ai_suggestion(chat_id, "advice", note=note, reason="ÙØ¯ÛØ± ÙÙØ´ÙÙØ¯", confidence=c, raw_json=json.dumps(adv, ensure_ascii=False))
+            advice_items.append(sid)
+
+    result = (
+        "â ØªØ­ÙÛÙ ØªÙØ§Ù Ø´Ø¯\n\n"
+        f"Ø§Ø¹ÙØ§ÙâØ´Ø¯ÙâÙØ§: {applied_count}\n"
+        f"Ú©Ø§Ø± Ø¬Ø¯ÛØ¯: {new_count}\n"
+        f"Ø´Ø±Ø­ Ø§Ø¶Ø§ÙÙâØ´Ø¯Ù: {note_count}\n"
+        f"ØªØºÛÛØ± ÙØ¶Ø¹ÛØª: {status_count}"
+    )
+    if skipped_count:
+        result += f"\nØ±Ø¯ Ø´Ø¯Ù Ø¨Ù Ø®Ø§Ø·Ø± Ø§Ø·ÙÛÙØ§Ù Ù¾Ø§ÛÛÙ: {skipped_count}"
+
+    if advice_items:
+        sid = advice_items[0]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("ÙÙØ§ÛØ´ Ú©Ø§ÙÙØª", callback_data=f"advice:show:{sid}"), InlineKeyboardButton("Ø±Ø¯", callback_data=f"advice:reject:{sid}")]])
+        result += "\n\nð§  Ú©Ø§ÙÙØª ÙØ¯ÛØ±ÛØªÛ Ø¯Ø§Ø±Ù. Ø§Ø¬Ø§Ø²Ù ÙÛâØ¯ÙÛ ÙØ´Ø§Ù Ø¨Ø¯ÙÙØ"
+        await progress_message.edit_text(result, reply_markup=kb)
+    else:
+        await progress_message.edit_text(result)
+
+# ------------------------- reports -------------------------
+
+def build_daily_report() -> str:
+    tasks = get_tasks(include_done=True, include_deleted=False, limit=10000)
+    today = datetime.now().strftime("%Y-%m-%d")
+    open_tasks = [t for t in tasks if t.get("status") not in ["done", "cancelled"]]
+    done_today = [t for t in tasks if (t.get("completed_at") or "").startswith(today)]
+    urgent = [t for t in open_tasks if t.get("priority") in ["ÙÙØ±Û", "Ø²ÛØ§Ø¯"]]
+    projects: Dict[str, int] = {}
+    for t in open_tasks:
+        projects[t.get("project") or "ØºÛØ±Ù"] = projects.get(t.get("project") or "ØºÛØ±Ù", 0) + 1
+    ptext = "\n".join([f"â¢ {p}: {c}" for p, c in projects.items()]) or "ÙÙØ±Ø¯Û Ø«Ø¨Øª ÙØ´Ø¯Ù"
+    return f"ð Ú¯Ø²Ø§Ø±Ø´ Ø±ÙØ²Ø§ÙÙ SAM\n\nØªØ§Ø±ÛØ®: {today}\n\nÚ©Ø§Ø±ÙØ§Û Ø¨Ø§Ø²: {len(open_tasks)}\nÚ©Ø§Ø±ÙØ§Û ÙÙØ±Û/Ø²ÛØ§Ø¯: {len(urgent)}\nØ§ÙØ¬Ø§ÙâØ´Ø¯Ù Ø§ÙØ±ÙØ²: {len(done_today)}\n\nÙØ¶Ø¹ÛØª Ù¾Ø±ÙÚÙâÙØ§:\n{ptext}"
 
 
-# راه‌اندازی و هندلرهای نسخه ۵.۳
-v53_init_db()
-app.add_handler(CommandHandler("start", v53_start), group=-10)
-app.add_handler(CommandHandler("help", v53_help), group=-10)
-app.add_handler(CommandHandler("tasks", v53_tasks_cmd), group=-10)
-app.add_handler(CommandHandler("followup", v53_followup_cmd), group=-10)
-app.add_handler(CommandHandler("today", v53_today_cmd), group=-10)
-app.add_handler(CommandHandler("done", v53_done_cmd), group=-10)
-app.add_handler(CommandHandler("delete", v53_delete_cmd), group=-10)
-app.add_handler(CommandHandler("remind", v53_remind_cmd), group=-10)
-app.add_handler(CommandHandler("smart", v53_smart_cmd), group=-10)
-app.add_handler(CommandHandler("summary", v53_summary_cmd), group=-10)
-app.add_handler(CommandHandler("newtask", v53_newtask_cmd), group=-10)
-app.add_handler(CommandHandler("new", v53_newtask_cmd), group=-10)
-app.add_handler(CommandHandler("export_excel", v53_export_excel), group=-10)
-app.add_handler(CallbackQueryHandler(v53_callback, pattern="^v53:"), group=-10)
-app.add_handler(MessageHandler(filters.VOICE, v53_voice_handler), group=-10)
-app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, v53_file_handler), group=-10)
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v53_text_router), group=-10)
+def build_weekly_report() -> str:
+    tasks = get_tasks(include_done=True, include_deleted=False, limit=10000)
+    since = datetime.now() - timedelta(days=7)
+    week = [t for t in tasks if parse_db_dt(t.get("created_at")) and parse_db_dt(t.get("created_at")) >= since]
+    done = [t for t in week if t.get("status") == "done"]
+    return f"ð Ú¯Ø²Ø§Ø±Ø´ ÙÙØªÚ¯Û SAM\n\nÚ©Ø§Ø±ÙØ§Û Ø¬Ø¯ÛØ¯ ÙÙØªÙ: {len(week)}\nØ§ÙØ¬Ø§ÙâØ´Ø¯Ù: {len(done)}\nØ¨Ø§Ø² Ø§Ø² Ú©Ø§Ø±ÙØ§Û ÙÙØªÙ: {len([t for t in week if t.get('status') not in ['done','cancelled']])}"
 
-# =================== END V5.3 CLEAN GROUP + SMART FIX ===================
+
+def build_excel_report() -> str:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Tasks"
+    headers = ["ID", "Title", "Project", "Status", "Priority", "Reminder", "Created", "Completed", "Description"]
+    ws.append(headers)
+    for t in get_tasks(include_done=True, include_deleted=False, limit=10000):
+        ws.append([
+            t.get("id"), t.get("title"), t.get("project"), STATUSES.get(t.get("status"), t.get("status")),
+            t.get("priority"), t.get("reminder_time"), t.get("created_at"), t.get("completed_at"), t.get("description"),
+        ])
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 45)
+    path = tempfile.mktemp(suffix=".xlsx")
+    wb.save(path)
+    return path
+
+
+def build_pdf_report() -> str:
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfgen import canvas
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        path = tempfile.mktemp(suffix=".pdf")
+        c = canvas.Canvas(path, pagesize=A4)
+        try:
+            pdfmetrics.registerFont(TTFont("DejaVu", font_path))
+            c.setFont("DejaVu", 10)
+        except Exception:
+            c.setFont("Helvetica", 10)
+        y = 800
+        c.drawString(40, y, "SAM PRO Team Manager Report")
+        y -= 25
+        for t in get_tasks(include_done=True, include_deleted=False, limit=80):
+            line = f"#{t.get('id')} | {t.get('project')} | {t.get('status')} | {trim(t.get('title') or '', 70)}"
+            c.drawString(40, y, line)
+            y -= 17
+            if y < 50:
+                c.showPage()
+                try:
+                    c.setFont("DejaVu", 10)
+                except Exception:
+                    c.setFont("Helvetica", 10)
+                y = 800
+        c.save()
+        return path
+    except Exception:
+        path = tempfile.mktemp(suffix=".txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(build_daily_report())
+        return path
+
+# ------------------------- jobs -------------------------
+
+async def followup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not GROUP_CHAT_ID:
+        return
+    tasks = get_open_tasks(200)
+    text = "â± Ù¾ÛÚ¯ÛØ±Û Ø³ÙâØ³Ø§Ø¹ØªÙ\n\n" + task_list_text(tasks)
+    try:
+        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, reply_markup=task_list_keyboard(tasks))
+    except Exception as e:
+        print(f"followup_job error: {e}")
+
+
+async def check_due_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    now = datetime.now()
+    for task in get_open_tasks(500):
+        dt = parse_db_dt(task.get("reminder_time"))
+        if not dt or dt > now:
+            continue
+        text = f"â° ÛØ§Ø¯Ø¢ÙØ±Û\n\n{task_summary_label(task)}"
+        if task.get("assigned_to"):
+            try:
+                await context.bot.send_message(chat_id=task.get("assigned_to"), text=text, reply_markup=task_menu_keyboard(task["id"]))
+            except Exception as e:
+                print(f"private reminder error: {e}")
+        if GROUP_CHAT_ID:
+            try:
+                await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, reply_markup=task_menu_keyboard(task["id"]))
+            except Exception as e:
+                print(f"group reminder error: {e}")
+        repeat = task.get("reminder_repeat") or "none"
+        if repeat == "daily":
+            update_task_field(task["id"], "reminder_time", (dt + timedelta(days=1)).strftime("%Y-%m-%d %H:%M"))
+        elif repeat == "weekly":
+            update_task_field(task["id"], "reminder_time", (dt + timedelta(days=7)).strftime("%Y-%m-%d %H:%M"))
+        else:
+            update_task_field(task["id"], "reminder_time", "none")
+        add_history(task["id"], 0, "BOT", "reminder_sent", "", task.get("reminder_time"))
+
+
+async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    targets = set(get_admin_ids())
+    if GROUP_CHAT_ID:
+        targets.add(GROUP_CHAT_ID)
+    for chat_id in targets:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=build_daily_report())
+        except Exception as e:
+            print(f"daily report error: {e}")
+
+# ------------------------- app -------------------------
+
+def build_app() -> Application:
+    init_db()
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("tasks", tasks_command))
+    app.add_handler(CommandHandler("newtask", newtask_command))
+    app.add_handler(CommandHandler("new", newtask_command))
+    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("delete", delete_command))
+    app.add_handler(CommandHandler("restore", restore_command))
+    app.add_handler(CommandHandler("remind", remind_command))
+    app.add_handler(CommandHandler("note", note_command))
+    app.add_handler(CommandHandler("checklist", checklist_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("dailyreport", daily_report_command))
+    app.add_handler(CommandHandler("report", daily_report_command))
+    app.add_handler(CommandHandler("weeklyreport", weekly_report_command))
+    app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("smart", smart_command))
+    app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(CommandHandler("exit", exit_command))
+    app.add_handler(CommandHandler("whoami", whoami))
+    app.add_handler(CommandHandler("profile", whoami))
+    app.add_handler(CommandHandler("members", members))
+    app.add_handler(CommandHandler("chatid", chatid_command))
+    app.add_handler(CommandHandler("export_excel", export_excel_command))
+    app.add_handler(CommandHandler("export_pdf", export_pdf_command))
+
+    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler), group=0)
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, file_router), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router), group=1)
+
+    # Every minute checks only due reminders; it does NOT send the task list.
+    app.job_queue.run_repeating(check_due_reminders, interval=60, first=20)
+    # The group follow-up list is sent only every 3 hours.
+    app.job_queue.run_repeating(followup_job, interval=3 * 60 * 60, first=3 * 60 * 60)
+    app.job_queue.run_daily(daily_report_job, time=time(hour=21, minute=0), name="daily_report")
+    return app
+
 
 if __name__ == "__main__":
-
-    print("SAM PRO Team Manager Started...")
-
-    job_queue = app.job_queue
-
-    job_queue.run_repeating(
-        check_tasks,
-        interval=3 * 60 * 60,
-        first=3 * 60 * 60,
-        name="three_hour_task_followup"
-    )
-
-    app.job_queue.run_daily(
-    send_daily_report_job,
-    time=datetime.strptime("07:40", "%H:%M").time(),
-    name="daily_report"
-)
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing")
+    print("BOT_TOKEN loaded:", bool(TOKEN), TOKEN[-6:] if TOKEN else "NO TOKEN")
+    print("OPENAI_MODEL:", OPENAI_MODEL)
+    print("GROUP_CHAT_ID:", GROUP_CHAT_ID)
+    app = build_app()
+    print("SAM PRO Team Manager V6 Stable Started...")
     app.run_polling(drop_pending_updates=True)
