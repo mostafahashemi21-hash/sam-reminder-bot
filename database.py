@@ -31,7 +31,61 @@ def init_db():
         priority TEXT DEFAULT 'medium',
         reminder_time TEXT,
         created_at TEXT,
-        completed_at TEXT
+        completed_at TEXT,
+        project TEXT DEFAULT '🧩 عمومی',
+        tag TEXT DEFAULT '🧩 عمومی' 
+    )
+    """)
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS task_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        user_id INTEGER,
+        full_name TEXT,
+        note_text TEXT,
+        source TEXT DEFAULT 'manual',
+        created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS task_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        user_id INTEGER,
+        full_name TEXT,
+        action TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS task_message_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        chat_id INTEGER,
+        message_id INTEGER,
+        created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ai_task_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        task_id INTEGER,
+        proposed_status TEXT,
+        note_text TEXT,
+        confidence REAL,
+        reason TEXT,
+        advice TEXT,
+        source_text TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
     )
     """)
 
@@ -142,8 +196,12 @@ def create_task(
         created_at
     ))
 
+    task_id = cur.lastrowid
+
     conn.commit()
     conn.close()
+
+    return task_id
 
 
 def get_tasks():
