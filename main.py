@@ -1649,15 +1649,17 @@ def get_task_draft(user_id):
 
     if user_id not in TASK_DRAFTS:
         TASK_DRAFTS[user_id] = {
-            "title": "",
-            "assigned_to": None,
-            "member_name": "",
-            "priority": "🟡 متوسط",
-            "reminder_time": "none",
-            "reminder_text": "بدون یادآوری",
-            "panel_chat_id": None,
-            "panel_message_id": None
-        }
+    "title": "",
+    "assigned_to": None,
+    "member_name": "",
+    "priority": "🟡 متوسط",
+    "project": "🧩 عمومی",
+    "tag": "🧩 عمومی",
+    "reminder_time": "none",
+    "reminder_text": "بدون یادآوری",
+    "panel_chat_id": None,
+    "panel_message_id": None
+}
 
     return TASK_DRAFTS[user_id]
 
