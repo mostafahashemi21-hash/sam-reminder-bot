@@ -720,16 +720,14 @@ async def buttons(
     text = update.message.text
 
     if text == "📋 کارها":
-
         await open_tasks_panel(update, context)
         return
 
-    elif text == "⏱ پیگیری":
-
+    if text == "⏱ پیگیری":
         await open_tasks_panel(update, context)
         return
 
-    elif text == "🧠 تحلیل چت":
+    if text == "🧠 تحلیل چت":
 
         keyboard = [
             ["⏱ یک ساعت اخیر"],
@@ -749,32 +747,27 @@ async def buttons(
 
         return
 
-    elif text == "⏱ یک ساعت اخیر":
-
+    if text == "⏱ یک ساعت اخیر":
         await summary_command(update, context, "1h")
         return
 
-    elif text == "⏱ دو ساعت اخیر":
-
+    if text == "⏱ دو ساعت اخیر":
         await summary_command(update, context, "2h")
         return
 
-    elif text == "📅 دیروز":
-
+    if text == "📅 دیروز":
         await summary_command(update, context, "yesterday")
         return
 
-    elif text == "📊 ۷ روز اخیر":
-
+    if text == "📊 ۷ روز اخیر":
         await summary_command(update, context, "7d")
         return
 
-    elif text == "⬅️بازگشت":
-
+    if text == "⬅️بازگشت":
         await start(update, context)
         return
 
-    elif text == "🤖 دستیار هوشمند":
+    if text == "🤖 دستیار هوشمند":
 
         USER_STATE[
             update.effective_user.id
@@ -792,27 +785,23 @@ async def buttons(
 
         return
 
-    elif text == "👥 اعضا":
-
+    if text == "👥 اعضا":
         await members(update, context)
         return
 
-    elif text == "📊 آمار":
-
+    if text == "📊 آمار":
         await stats(update, context)
         return
 
-    elif text == "👤 پروفایل":
-
+    if text == "👤 پروفایل":
         await whoami(update, context)
         return
 
-        elif text == "➕ کار جدید":
-
+    if text == "➕ کار جدید":
         await open_task_panel(update, context)
         return
 
-    elif "فرمان صوتی" in text:
+    if "فرمان صوتی" in text or "کار با ویس" in text:
 
         context.user_data["waiting_voice_task"] = True
 
@@ -839,7 +828,6 @@ async def buttons(
         )
 
         return
-
 task_conversation = ConversationHandler(
 
     entry_points=[
