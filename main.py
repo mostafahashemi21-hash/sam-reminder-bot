@@ -3298,7 +3298,22 @@ async def chatid_command(
 {update.effective_chat.type}
 """
     )
+async def chatid_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
+    await update.message.reply_text(
+        f"""
+🆔 Chat ID:
+
+{update.effective_chat.id}
+
+نوع چت:
+{update.effective_chat.type}
+"""
+    )
+    
 init_db()
 init_silent_ai_tables()
 init_task_metadata_columns()
