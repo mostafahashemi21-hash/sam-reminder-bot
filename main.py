@@ -2123,6 +2123,13 @@ app.add_handler(
 
 app.add_handler(
     CommandHandler(
+        "join",
+        join_command
+    )
+)
+
+app.add_handler(
+    CommandHandler(
         "whoami",
         whoami
     )
