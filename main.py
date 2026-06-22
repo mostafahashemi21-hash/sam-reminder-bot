@@ -2605,6 +2605,138 @@ def init_task_metadata_columns():
 
     conn.commit()
     conn.close()
+def get_daily_report_text():
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE status NOT IN ('done', 'cancelled')
+    """)
+    open_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE status='done'
+    """)
+    done_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE status='cancelled'
+    """)
+    cancelled_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE status NOT IN ('done', 'cancelled')
+        AND priority LIKE '%زیاد%'
+    """)
+    high_priority_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE status NOT IN ('done', 'cancelled')
+        AND reminder_time != 'none'
+        AND reminder_time < ?
+    """, (now_text,))
+    overdue_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE created_at LIKE ?
+    """, (today + "%",))
+    today_created_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT project, COUNT(*)
+        FROM tasks
+        WHERE status NOT IN ('done', 'cancelled')
+        GROUP BY project
+        ORDER BY COUNT(*) DESC
+    """)
+    project_rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT id, title, priority, project, tag, reminder_time
+        FROM tasks
+        WHERE status NOT IN ('done', 'cancelled')
+        ORDER BY id DESC
+        LIMIT 5
+    """)
+    latest_tasks = cur.fetchall()
+
+    conn.close()
+
+    projects_text = ""
+
+    if project_rows:
+        for project, count in project_rows:
+            projects_text += f"• {project}: {count}\n"
+    else:
+        projects_text = "موردی ثبت نشده"
+
+    latest_text = ""
+
+    if latest_tasks:
+        for task in latest_tasks:
+            task_id, title, priority, project, tag, reminder_time = task
+
+            reminder = (
+                "بدون یادآوری"
+                if reminder_time == "none"
+                else reminder_time
+            )
+
+            latest_text += f"""
+#{task_id} | {priority}
+{title}
+🏗 {project} | 🏷 {tag}
+⏰ {reminder}
+"""
+    else:
+        latest_text = "کاری وجود ندارد."
+
+    return f"""
+📊 گزارش روزانه SAM
+
+📅 تاریخ:
+{today}
+
+📋 کارهای باز:
+{open_count}
+
+🔥 کارهای فوری:
+{high_priority_count}
+
+⚠️ کارهای عقب‌افتاده:
+{overdue_count}
+
+✅ کل انجام‌شده‌ها:
+{done_count}
+
+🗑 حذف‌شده‌ها:
+{cancelled_count}
+
+🆕 کارهای ثبت‌شده امروز:
+{today_created_count}
+
+🏗 وضعیت پروژه‌ها:
+{projects_text}
+
+📌 آخرین کارهای باز:
+{latest_text}
+"""
 
 init_db()
 init_silent_ai_tables()
