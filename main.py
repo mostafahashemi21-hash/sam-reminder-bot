@@ -571,7 +571,10 @@ async def safe_reply(update: Update, text: str, reply_markup: Any = None, parse_
         msg = await src.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
     elif update.effective_chat:
         msg = await update.effective_chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-    if msg and is_status_text(text):
+    # Important: messages that carry the lower ReplyKeyboard must NOT be auto-deleted.
+    # If Telegram deletes the message that introduced the ReplyKeyboard in a group,
+    # many clients hide the lower visual menu again.
+    if msg and is_status_text(text) and not isinstance(reply_markup, ReplyKeyboardMarkup):
         asyncio.create_task(auto_delete_later(msg))
     return msg
 
@@ -587,9 +590,27 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def temp_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup: Any = None, parse_mode: Optional[str] = ParseMode.HTML, seconds: Optional[int] = None):
     """Short bot status messages such as پردازش / ثبت شد are removed automatically."""
     msg = await safe_reply(update, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    # Never delete a message whose only purpose is to install the lower visual keyboard.
+    if isinstance(reply_markup, ReplyKeyboardMarkup):
+        return msg
     if msg and AUTO_DELETE_BOT_STATUS and context.job_queue:
         context.job_queue.run_once(delete_message_job, when=seconds or STATUS_DELETE_SECONDS, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
     return msg
+
+
+async def send_bottom_keyboard_anchor(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = "⌨️ منوی پایین SAM فعال است"):
+    """Send a persistent ReplyKeyboard anchor message.
+
+    Telegram lower reply keyboards in groups are attached to a normal bot message.
+    If that message is auto-deleted, some Telegram clients remove the lower menu.
+    Therefore this message is intentionally NOT auto-deleted.
+    """
+    src = update.effective_message
+    if src:
+        return await src.reply_text(text, reply_markup=main_keyboard(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    if update.effective_chat:
+        return await update.effective_chat.send_message(text, reply_markup=main_keyboard(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    return None
 
 
 async def edit_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup: Any = None, parse_mode: Optional[str] = ParseMode.HTML):
@@ -663,13 +684,14 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, text: st
         return
 
     if chat_is_group(update):
-        # 1) Activate the lower visual keyboard for users in the group.
-        # This message is short and is auto-deleted if AUTO_DELETE_BOT_STATUS is true.
-        await temp_reply(update, context, "⌨️ منوی پایین فعال شد", reply_markup=main_keyboard(), seconds=STATUS_DELETE_SECONDS)
-        # 2) Also send inline pinned menu. Inline buttons never type text into the group.
+        # 1) Install the lower visual ReplyKeyboard in the group.
+        # This message must remain in the chat; otherwise the lower digital menu
+        # disappears on many Telegram clients. Pin/delete manually only if needed.
+        await send_bottom_keyboard_anchor(update, context, "⌨️ منوی پایین SAM فعال است")
+        # 2) Also send an inline menu that can be pinned. Inline buttons never type text into the group.
         await safe_reply(
             update,
-            f"🤖 <b>SAM PRO Team Manager</b>\n{html(text)}\n\nبرای گروه بهتر است این منوی تصویری را Pin کنی.",
+            f"🤖 <b>SAM PRO Team Manager</b>\n{html(text)}\n\nاین منوی تصویری را هم می‌توانی Pin کنی، ولی منوی پایین هم فعال شد.",
             reply_markup=main_inline_keyboard(),
         )
         return
@@ -688,6 +710,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await register_user(update, private=(update.effective_chat.type == "private" if update.effective_chat else False))
     await show_home(update, context, "منو آماده است")
+
+
+async def keyboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Only install the lower visual ReplyKeyboard, without extra inline card."""
+    await register_user(update, private=(update.effective_chat.type == "private" if update.effective_chat else False))
+    if chat_is_channel(update):
+        await safe_reply(update, "در کانال منوی پایین تلگرام مثل گروه/چت خصوصی نمایش داده نمی‌شود. از /post_menu استفاده کن.", reply_markup=main_inline_keyboard())
+        return
+    await send_bottom_keyboard_anchor(update, context, "⌨️ منوی پایین SAM فعال شد")
 
 
 async def post_menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2182,6 +2213,7 @@ def build_app() -> Application:
     # commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("keyboard", keyboard_cmd))
     app.add_handler(CommandHandler("post_menu", post_menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("exit", exit_cmd))
