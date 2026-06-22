@@ -3207,12 +3207,14 @@ async def handle_voice_command(
 
         return True
 
-    if (
-        "مانده" in text
-        or "باقی" in text
-        or "باز" in text
-        or "انجام نشده" in text
-    ):
+    remaining_words = [
+        "مانده",
+        "باقی",
+        "باز",
+        "انجام نشده"
+    ]
+
+    if any(word in text for word in remaining_words):
 
         await update.message.reply_text(
             get_voice_tasks_text("remaining")
@@ -3220,27 +3222,29 @@ async def handle_voice_command(
 
         return True
 
-            if (
-        "لیست کار" in text
-        or "کارها" in text
-        or "کارا" in text
-        or "کارارو" in text
-        or "کارها رو" in text
-        or "کارها را" in text
-        or "امور" in text
-        or "عمر" in text
-        or "بفرست" in text
-        or "نمایش بده" in text
-        or "نشان بده" in text
-    ):
+    list_words = [
+        "لیست کار",
+        "کارها",
+        "کارا",
+        "کارارو",
+        "کارها رو",
+        "کارها را",
+        "امور",
+        "عمر",
+        "بفرست",
+        "نمایش بده",
+        "نشان بده"
+    ]
+
+    if any(word in text for word in list_words):
 
         await update.message.reply_text(
             get_voice_tasks_text("remaining")
         )
 
         return True
+
     return False
-
 init_db()
 init_silent_ai_tables()
 init_task_metadata_columns()
