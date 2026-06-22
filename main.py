@@ -2079,6 +2079,26 @@ async def task_draft_text_input(
     )
 
     raise ApplicationHandlerStop
+async def join_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await register_user(update)
+
+    await update.message.reply_text(
+        f"""
+✅ ثبت شد
+
+👤 نام:
+{update.effective_user.full_name}
+
+🆔 Telegram ID:
+{update.effective_user.id}
+
+از این به بعد می‌شود این شخص را به‌عنوان مسئول کار انتخاب کرد.
+"""
+    )
 
 init_db()
 init_silent_ai_tables()
