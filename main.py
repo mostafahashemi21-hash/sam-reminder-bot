@@ -2738,6 +2738,26 @@ def get_daily_report_text():
 {latest_text}
 """
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text(get_daily_report_text())
+async def send_daily_report_job(
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    report = get_daily_report_text()
+
+    admin_ids = get_admin_ids()
+
+    for admin_id in admin_ids:
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=report
+            )
+
+        except Exception as e:
+
+            print(f"Daily report send error for {admin_id}: {e}")
 
 init_db()
 init_silent_ai_tables()
@@ -2988,4 +3008,9 @@ if __name__ == "__main__":
         first=10
     )
 
+    app.job_queue.run_daily(
+    send_daily_report_job,
+    time=datetime.strptime("21:00", "%H:%M").time(),
+    name="daily_report"
+)
     app.run_polling(drop_pending_updates=True)
