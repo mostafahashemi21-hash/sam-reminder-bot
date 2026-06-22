@@ -2416,6 +2416,52 @@ async def task_menu_callback(
         )
 
         return
+PROJECT_OPTIONS = [
+    "🏗 چوب",
+    "💰 مالی",
+    "🚚 حمل‌ونقل",
+    "📄 قرارداد",
+    "📞 مشتری",
+    "📦 سفارش",
+    "🧩 عمومی"
+]
+
+
+TAG_OPTIONS = [
+    "🔥 فوری",
+    "📞 تماس",
+    "💵 پرداخت",
+    "📄 سند",
+    "🚚 ارسال",
+    "🔍 پیگیری",
+    "🧠 تحلیل",
+    "🧩 عمومی"
+]
+
+
+def init_task_metadata_columns():
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            ALTER TABLE tasks
+            ADD COLUMN project TEXT DEFAULT '🧩 عمومی'
+        """)
+    except:
+        pass
+
+    try:
+        cur.execute("""
+            ALTER TABLE tasks
+            ADD COLUMN tag TEXT DEFAULT '🧩 عمومی'
+        """)
+    except:
+        pass
+
+    conn.commit()
+    conn.close()
 
 init_db()
 init_silent_ai_tables()
