@@ -718,11 +718,31 @@ async def buttons(
 
     text = update.message.text
 
-    if text == "📋 کارها":
+        if text == "📋 کارها":
 
         await list_tasks(update, context)
 
-    elif text == "🤖 دستیار هوشمند":
+    elif text == "🧠 تحلیل چت":
+
+        keyboard = [
+            ["⏱ یک ساعت اخیر"],
+            ["⏱ دو ساعت اخیر"],
+            ["📅 دیروز"],
+            ["📊 ۷ روز اخیر"],
+            ["⬅️ بازگشت"]
+        ]
+
+        await update.message.reply_text(
+            "🧠 بازه تحلیل چت را انتخاب کن:",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard,
+                resize_keyboard=True
+            )
+        )
+
+        return
+
+        elif text == "🤖 دستیار هوشمند":
 
         USER_STATE[
             update.effective_user.id
