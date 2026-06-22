@@ -2737,7 +2737,7 @@ def get_daily_report_text():
 📌 آخرین کارهای باز:
 {latest_text}
 """
-    async def daily_report_command(
+async def daily_report_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
