@@ -2572,6 +2572,54 @@ app.add_handler(
         buttons
     )
 )
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^⏱ پیگیری$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^🧠 تحلیل چت$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^⏱ یک ساعت اخیر$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^⏱ دو ساعت اخیر$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^📅 دیروز$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^📊 ۷ روز اخیر$"),
+        buttons
+    )
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^⬅️بازگشت$"),
+        buttons
+    )
+)
 
 app.add_handler(
     MessageHandler(
