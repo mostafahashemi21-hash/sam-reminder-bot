@@ -4042,6 +4042,884 @@ app.add_handler(CallbackQueryHandler(v5_callback, pattern="^v5:"), group=-1)
 app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, v5_file), group=-1)
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v5_text), group=-1)
 
+
+
+# =================== V5.3 CLEAN GROUP + SMART FIX ===================
+# این بخش عمداً با group=-10 قبل از هندلرهای قدیمی اجرا می‌شود تا:
+# 1) گروه شلوغ نشود
+# 2) پیام‌های معمولی دیگر وارد حالت زمان/یادآوری گیر نکنند
+# 3) لیست کارها فقط به‌صورت منوی دکمه‌ای بیاید
+# 4) مدیر هوشمند واقعاً چت و کارها را با OpenAI تحلیل کند
+
+V53_PROJECTS = ["تخته", "میوه", "پتروشیمی", "مالی", "غلات", "غیره"]
+V53_STATUS_WORDS = {
+    "done": ["انجام شد", "انجام دادم", "تمام شد", "اوکی شد", "حل شد", "فرستادم", "ارسال شد", "تکمیل شد"],
+    "waiting": ["جواب نداد", "جواب ندادند", "منتظر", "خبر بده", "خبر بدهند", "پاسخ", "تماس نگرفت", "فعلا جواب"],
+    "in_progress": ["پیگیری", "در حال", "شروع", "دارم انجام", "در دست انجام"],
+    "cancelled": ["لغو", "کنسل", "حذف"]
+}
+
+
+def v53_model():
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def v53_transcribe_model():
+    return os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+
+
+def v53_has_openai_key():
+    return bool(os.getenv("OPENAI_API_KEY")) and client is not None
+
+
+def v53_init_db():
+    conn = v5_conn()
+    cur = conn.cursor()
+    try:
+        v5_add_col(cur, "tasks", "description", "TEXT DEFAULT ''")
+        v5_add_col(cur, "tasks", "project", "TEXT DEFAULT 'غیره'")
+        v5_add_col(cur, "tasks", "tag", "TEXT DEFAULT 'عمومی'")
+        v5_add_col(cur, "tasks", "reminder_repeat", "TEXT DEFAULT 'none'")
+        v5_add_col(cur, "tasks", "deleted", "INTEGER DEFAULT 0")
+        v5_add_col(cur, "tasks", "pinned", "INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    cur.execute("CREATE TABLE IF NOT EXISTS task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, note TEXT, source TEXT, message_id INTEGER, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_history (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, action TEXT, old_value TEXT, new_value TEXT, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, user_id INTEGER, full_name TEXT, file_id TEXT, file_type TEXT, caption TEXT, created_at TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS task_message_links (chat_id INTEGER, message_id INTEGER, task_id INTEGER, created_at TEXT, PRIMARY KEY(chat_id,message_id))")
+    cur.execute("CREATE TABLE IF NOT EXISTS v53_advices (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, advice TEXT, created_at TEXT, shown INTEGER DEFAULT 0)")
+    conn.commit()
+    conn.close()
+
+
+def v53_clear_states(context):
+    for key in [
+        "waiting_custom_reminder",
+        "task_draft_waiting",
+        "waiting_note_task_id",
+        "waiting_check_task_id",
+        V5_NOTE_WAIT if 'V5_NOTE_WAIT' in globals() else "v5_waiting_note",
+        "waiting_voice",
+    ]:
+        try:
+            context.user_data.pop(key, None)
+        except Exception:
+            pass
+
+
+def v53_save_chat(update):
+    try:
+        if update.message and update.message.text and not update.message.text.startswith('/'):
+            save_chat_message(update)
+    except Exception as e:
+        print(f"v53 save chat error: {e}")
+
+
+def v53_detect_project(text):
+    text = text or ""
+    if any(w in text for w in ["تخته", "چوب", "mdf", "ام دی اف", "الواری", "کاج", "روسیه"]):
+        return "تخته"
+    if any(w in text for w in ["میوه", "سیب", "پرتقال", "موز", "کیوی", "نارنگی", "نکتارین", "هندوانه", "کاهو", "سبزی"]):
+        return "میوه"
+    if any(w in text for w in ["پتروشیمی", "شیمی", "سایبر", "سیبور", "sibur", "sbr", "پلیمر", "نفت", "گاز"]):
+        return "پتروشیمی"
+    if any(w in text for w in ["مالی", "پول", "پرداخت", "حساب", "فاکتور", "بانک", "دلار", "روبل", "تومان", "بدهی", "طلب"]):
+        return "مالی"
+    if any(w in text for w in ["غلات", "گندم", "جو", "ذرت", "نخود", "لوبیا", "برنج", "دانه"]):
+        return "غلات"
+    return "غیره"
+
+
+def v53_priority(text):
+    text = text or ""
+    if any(w in text for w in ["فوری", "ضروری", "مهم", "زیاد", "بالا", "اورژانسی", "سریع"]):
+        return "🔴 زیاد"
+    if any(w in text for w in ["کم", "بعدا", "پایین", "آرام"]):
+        return "🟢 کم"
+    return "🟡 متوسط"
+
+
+def v53_status_from_text(text):
+    text = text or ""
+    for status, words in V53_STATUS_WORDS.items():
+        if any(w in text for w in words):
+            return status
+    return None
+
+
+def v53_open_tasks(limit=80):
+    conn = v5_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id,title,assigned_to,assigned_by,status,priority,reminder_time,created_at,completed_at,description,project,tag,reminder_repeat,deleted,pinned
+        FROM tasks
+        WHERE COALESCE(deleted,0)=0
+          AND status NOT IN ('done','cancelled')
+        ORDER BY COALESCE(pinned,0) DESC, id DESC
+        LIMIT ?
+    """, (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    keys = ["id","title","assigned_to","assigned_by","status","priority","reminder_time","created_at","completed_at","description","project","tag","reminder_repeat","deleted","pinned"]
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def v53_all_tasks(limit=10000):
+    return v5_tasks(False, limit)
+
+
+def v53_short_title(title, n=42):
+    title = (title or "").replace("\n", " ").strip()
+    return title[:n] + ("…" if len(title) > n else "")
+
+
+def v53_list_keyboard(tasks=None):
+    tasks = tasks if tasks is not None else v53_open_tasks()
+    keyboard = []
+    if not tasks:
+        keyboard.append([InlineKeyboardButton("✅ کار بازی وجود ندارد", callback_data="v53:none")])
+    else:
+        for t in tasks[:40]:
+            status = STATUS_TEXT.get(t.get("status"), t.get("status"))
+            project = t.get("project") or v53_detect_project(t.get("title") or "")
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"#{t['id']} | {project} | {t.get('priority') or '🟡 متوسط'} | {v53_short_title(t.get('title'))}",
+                    callback_data=f"v53:open:{t['id']}"
+                )
+            ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def v53_task_menu(task_id):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ انجام شد", callback_data=f"v53:status:{task_id}:done"),
+            InlineKeyboardButton("🔄 پیگیری", callback_data=f"v53:status:{task_id}:in_progress"),
+        ],
+        [
+            InlineKeyboardButton("⏳ منتظر", callback_data=f"v53:status:{task_id}:waiting"),
+            InlineKeyboardButton("⛔ لغو", callback_data=f"v53:status:{task_id}:cancelled"),
+        ],
+        [
+            InlineKeyboardButton("📁 پروژه", callback_data=f"v53:projectmenu:{task_id}"),
+            InlineKeyboardButton("📝 شرح‌ها", callback_data=f"v53:notes:{task_id}"),
+        ],
+        [
+            InlineKeyboardButton("📎 فایل‌ها", callback_data=f"v53:files:{task_id}"),
+            InlineKeyboardButton("🧾 تاریخچه", callback_data=f"v53:history:{task_id}"),
+        ],
+        [
+            InlineKeyboardButton("🗑 حذف", callback_data=f"v53:status:{task_id}:cancelled"),
+            InlineKeyboardButton("⬅️ لیست", callback_data="v53:list"),
+        ],
+    ])
+
+
+def v53_project_keyboard(task_id):
+    rows = []
+    for i, p in enumerate(V53_PROJECTS):
+        rows.append([InlineKeyboardButton(p, callback_data=f"v53:setproject:{task_id}:{i}")])
+    rows.append([InlineKeyboardButton("⬅️ برگشت", callback_data=f"v53:open:{task_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def v53_task_text(t):
+    status = STATUS_TEXT.get(t.get('status'), t.get('status'))
+    project = t.get('project') or v53_detect_project(t.get('title') or '')
+    rem = t.get('reminder_time') or 'none'
+    rem = 'ندارد' if rem == 'none' else rem
+    desc = t.get('description') or '-'
+    return f"""📌 کار #{t['id']}
+
+{t.get('title')}
+
+📁 پروژه: {project}
+🔥 اولویت: {t.get('priority') or '🟡 متوسط'}
+📍 وضعیت: {status}
+⏰ یادآوری: {rem}
+
+📝 توضیح:
+{desc}"""
+
+
+def v53_find_task(text):
+    text = fa_to_en_digits(text or "")
+    m = re.search(r"(?:کار|task|#)\s*(\d+)", text, flags=re.I)
+    if m:
+        return v5_task(int(m.group(1)))
+
+    # مثال: «کار kkk انجام شد» یا «kkk انجام شد»
+    cleaned = text
+    for w in ["کار", "انجام شد", "انجام", "تمام شد", "منتظر", "پیگیری", "لغو", "کنسل", "حذف"]:
+        cleaned = cleaned.replace(w, " ")
+    words = [w.strip() for w in re.split(r"\s+", cleaned) if len(w.strip()) >= 2]
+    if not words:
+        return None
+    tasks = v53_open_tasks(120)
+    for t in tasks:
+        title = (t.get('title') or '').lower()
+        if any(w.lower() in title for w in words):
+            return t
+    return None
+
+
+def v53_insert_task(title, assigned_to, assigned_by, priority, project, description="", reminder_time="none"):
+    conn = v5_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO tasks (title,assigned_to,assigned_by,status,priority,reminder_time,created_at,description,project,tag)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (title, assigned_to, assigned_by, "pending", priority, reminder_time, v5_now(), description, project, "عمومی"))
+    task_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    try:
+        v5_history(task_id, assigned_by, v5_member_name(assigned_by), "create", "", title)
+    except Exception:
+        pass
+    return task_id
+
+
+async def v53_create_from_text(update, context, raw):
+    raw = (raw or "").strip()
+    title = re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید|ثبت کار|بساز)\s*[:：\-]?\s*", "", raw).strip()
+    if not title:
+        await update.message.reply_text("عنوان کار را بنویس.")
+        raise ApplicationHandlerStop
+    assigned_to = update.effective_user.id
+    assigned_name = update.effective_user.full_name
+    for u in get_users():
+        uid, username, full_name, role = u[:4]
+        if (full_name and full_name.split()[0] in raw) or (username and ('@' + username) in raw):
+            assigned_to = uid
+            assigned_name = full_name
+            break
+    project = v53_detect_project(raw)
+    task_id = v53_insert_task(
+        title=title[:180],
+        assigned_to=assigned_to,
+        assigned_by=update.effective_user.id,
+        priority=v53_priority(raw),
+        project=project,
+        description=f"ثبت از پیام: {raw}",
+        reminder_time="none"
+    )
+    try:
+        v5_note(task_id, update.effective_user.id, update.effective_user.full_name, f"متن اولیه: {raw}", "create", update.message.message_id)
+    except Exception:
+        pass
+    await update.message.reply_text("✅ ثبت شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_add_note(update, task_id, note, source="manual"):
+    t = v5_task(task_id) if task_id else None
+    if not t:
+        await update.message.reply_text("❌ کار پیدا نشد")
+        raise ApplicationHandlerStop
+    v5_note(task_id, update.effective_user.id, update.effective_user.full_name, note, source, update.message.message_id)
+    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "add_note", "", note)
+    status = v53_status_from_text(note)
+    if status:
+        old = t.get('status')
+        v5_update(task_id, "status", status)
+        if status == "done":
+            v5_update(task_id, "completed_at", v5_now())
+        v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "auto_status_from_note", old, status)
+    await update.message.reply_text("✅ ثبت شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_set_status(update, task, status):
+    if not task:
+        await update.message.reply_text("❌ کار پیدا نشد")
+        raise ApplicationHandlerStop
+    old = task.get('status')
+    task_id = task['id']
+    v5_update(task_id, "status", status)
+    if status == "done":
+        v5_update(task_id, "completed_at", v5_now())
+    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "status_text", old, status)
+    await update.message.reply_text("✅ ثبت شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_send_list(update, context, text="📋 کارهای باز"):
+    v53_clear_states(context)
+    await register_user(update)
+    tasks = v53_open_tasks()
+    await update.message.reply_text(
+        f"{text}\n\nروی هر کار بزن تا منوی همان کار باز شود.",
+        reply_markup=v53_list_keyboard(tasks)
+    )
+    raise ApplicationHandlerStop
+
+
+async def v53_start(update, context):
+    v53_clear_states(context)
+    await register_user(update)
+    keyboard = [
+        ["➕ کار جدید", "📋 کارها"],
+        ["🧠 تحلیل چت", "🧠 مدیر هوشمند"],
+        ["🎙 فرمان صوتی", "🤖 دستیار هوشمند"],
+        ["📊 گزارش‌ها", "❓ راهنما"],
+        ["👥 اعضا", "👤 پروفایل"],
+        ["⏱ پیگیری"],
+    ]
+    await update.message.reply_text("✅ ربات آماده است", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    raise ApplicationHandlerStop
+
+
+async def v53_help(update, context):
+    v53_clear_states(context)
+    await update.message.reply_text(
+        """❓ راهنما
+
+📋 /tasks — لیست دکمه‌ای کارها
+🧠 /smart — تحلیل چت و کارها با ChatGPT
+📤 /export_excel — خروجی اکسل
+
+نمونه‌ها:
+کار جدید: پیگیری قیمت تخته
+کار 1 انجام شد
+کار 1: زنگ زدم جواب ندادند
+/remind 1 2026-06-25 18:00"""
+    )
+    raise ApplicationHandlerStop
+
+
+async def v53_tasks_cmd(update, context):
+    await v53_send_list(update, context)
+
+
+async def v53_followup_cmd(update, context):
+    await v53_send_list(update, context, "⏱ پیگیری کارهای باز")
+
+
+async def v53_done_cmd(update, context):
+    v53_clear_states(context)
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("مثال: /done 1")
+        raise ApplicationHandlerStop
+    task = v53_find_task("کار " + text + " انجام شد")
+    await v53_set_status(update, task, "done")
+
+
+async def v53_delete_cmd(update, context):
+    v53_clear_states(context)
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("مثال: /delete 1")
+        raise ApplicationHandlerStop
+    task = v53_find_task("کار " + text + " حذف")
+    if not task:
+        await update.message.reply_text("❌ کار پیدا نشد")
+        raise ApplicationHandlerStop
+    v5_update(task['id'], "status", "cancelled")
+    v5_update(task['id'], "deleted", 1)
+    v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "delete", "", "cancelled")
+    await update.message.reply_text("✅ ثبت شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_remind_cmd(update, context):
+    v53_clear_states(context)
+    if len(context.args) < 2:
+        await update.message.reply_text("مثال: /remind 1 2026-06-25 18:00")
+        raise ApplicationHandlerStop
+    task = v53_find_task("کار " + context.args[0])
+    if not task:
+        await update.message.reply_text("❌ کار پیدا نشد")
+        raise ApplicationHandlerStop
+    reminder = v52_parse_reminder_text(" ".join(context.args[1:]))
+    if reminder is None:
+        await update.message.reply_text("❌ فرمت زمان اشتباه است. مثال: /remind 1 2026-06-25 18:00")
+        raise ApplicationHandlerStop
+    v5_update(task['id'], "reminder_time", reminder)
+    v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "remind", task.get('reminder_time'), reminder)
+    await update.message.reply_text("✅ ثبت شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_export_excel(update, context):
+    v53_clear_states(context)
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Tasks"
+        headers = ["ID", "عنوان", "پروژه", "وضعیت", "اولویت", "مسئول", "یادآوری", "تاریخ ثبت", "توضیح"]
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        for t in v53_all_tasks(10000):
+            ws.append([
+                t.get('id'),
+                t.get('title'),
+                t.get('project') or v53_detect_project(t.get('title') or ''),
+                STATUS_TEXT.get(t.get('status'), t.get('status')),
+                t.get('priority'),
+                v5_member_name(t.get('assigned_to')),
+                t.get('reminder_time'),
+                t.get('created_at'),
+                t.get('description'),
+            ])
+        for col in ws.columns:
+            max_len = max(len(str(c.value or "")) for c in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 2, 10), 45)
+        path = tempfile.mktemp(suffix=".xlsx")
+        wb.save(path)
+        with open(path, "rb") as f:
+            await update.message.reply_document(document=InputFile(f, filename="sam_tasks_report.xlsx"))
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطای خروجی اکسل: {e}")
+    raise ApplicationHandlerStop
+
+
+async def v53_today_cmd(update, context):
+    v53_clear_states(context)
+    today = datetime.now().strftime("%Y-%m-%d")
+    tasks = [t for t in v53_open_tasks(200) if str(t.get('created_at') or '').startswith(today) or str(t.get('reminder_time') or '').startswith(today)]
+    await update.message.reply_text(
+        "📅 کارهای امروز\n\nروی هر کار بزن تا منوی همان کار باز شود.",
+        reply_markup=v53_list_keyboard(tasks)
+    )
+    raise ApplicationHandlerStop
+
+
+def v53_recent_chat(chat_id, limit=80):
+    try:
+        rows = get_recent_chat_messages(chat_id, limit=limit)
+        return rows
+    except Exception:
+        return []
+
+
+def v53_json(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+    except Exception:
+        pass
+    return {}
+
+
+def v53_store_advice(chat_id, advice):
+    conn = v5_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO v53_advices (chat_id, advice, created_at, shown) VALUES (?,?,?,0)", (chat_id, advice, v5_now()))
+    sid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return sid
+
+
+def v53_get_advice(advice_id):
+    conn = v5_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, chat_id, advice, created_at, shown FROM v53_advices WHERE id=?", (advice_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+async def v53_smart_cmd(update, context):
+    v53_clear_states(context)
+    await register_user(update)
+    if not v53_has_openai_key():
+        await update.message.reply_text("❌ OPENAI_API_KEY تنظیم نشده")
+        raise ApplicationHandlerStop
+
+    wait_msg = await update.message.reply_text("🧠 در حال تحلیل چت و کارها...")
+    chat_id = update.effective_chat.id
+    messages = v53_recent_chat(chat_id, 80)
+    tasks = v53_open_tasks(80)
+
+    if not messages:
+        await update.message.reply_text("پیامی برای تحلیل ذخیره نشده. چند پیام در گروه بفرست و دوباره /smart را بزن.")
+        raise ApplicationHandlerStop
+
+    history = "\n".join(f"{r[2]} | {r[0]}: {r[1]}" for r in messages[-80:])
+    task_text = "\n".join(f"#{t['id']} | {t['title']} | پروژه:{t.get('project')} | وضعیت:{t.get('status')} | اولویت:{t.get('priority')}" for t in tasks)
+
+    prompt = f"""
+تو مدیر هوشمند تیم هستی. چت گروه و لیست کارهای باز را تحلیل کن.
+هدف: کارهای انجام‌شده را تشخیص بده، شرح‌های مربوط به کارها را پیدا کن، کار جدید لازم را استخراج کن، و اشتباهات برنامه‌ریزی/ریسک‌ها/مشورت مدیریتی را جداگانه پیشنهاد بده.
+
+قانون مهم:
+- اگر یک پیام مثل «زنگ زدم جواب ندادند» مربوط به کار باز است، type را add_note بگذار و note بده.
+- اگر کاری انجام شده، type را change_status و new_status=done بگذار.
+- اگر کار جدید لازم است، type را new_task بگذار.
+- اگر فقط نظر مدیریتی، اشتباه برنامه‌ریزی یا مشورت داری، type را advice بگذار. advice نباید مستقیم اعمال شود.
+- فقط JSON معتبر بده، بدون متن اضافه.
+
+فرمت خروجی:
+{{
+  "actions": [
+    {{
+      "type": "new_task|add_note|change_status|advice",
+      "task_id": 0,
+      "task_title_match": "اگر id مشخص نیست بخشی از عنوان کار",
+      "title": "برای new_task",
+      "note": "شرح یا مشورت",
+      "new_status": "done|waiting|in_progress|cancelled|",
+      "project": "تخته|میوه|پتروشیمی|مالی|غلات|غیره",
+      "priority": "🔴 زیاد|🟡 متوسط|🟢 کم",
+      "reason": "دلیل کوتاه",
+      "confidence": 0.0
+    }}
+  ]
+}}
+
+کارهای باز:
+{task_text if task_text else 'هیچ کار بازی نیست'}
+
+چت اخیر:
+{history}
+"""
+    try:
+        res = client.chat.completions.create(
+            model=v53_model(),
+            messages=[
+                {"role": "system", "content": "فقط JSON معتبر خروجی بده."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        data = v53_json(res.choices[0].message.content or "{}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطای مدیر هوشمند: {e}")
+        raise ApplicationHandlerStop
+
+    actions = data.get("actions", []) if isinstance(data, dict) else []
+    created = notes = statuses = 0
+    advices = []
+
+    for a in actions[:12]:
+        try:
+            confidence = float(a.get("confidence", 0) or 0)
+        except Exception:
+            confidence = 0
+        if confidence < 0.50:
+            continue
+        typ = str(a.get("type", "")).strip()
+        task_id = a.get("task_id") or 0
+        try:
+            task_id = int(task_id)
+        except Exception:
+            task_id = 0
+        task = v5_task(task_id) if task_id else None
+        if not task and a.get("task_title_match"):
+            task = v53_find_task(str(a.get("task_title_match")))
+        note = str(a.get("note", "")).strip()
+        title = str(a.get("title", "")).strip()
+        project = str(a.get("project", "")).strip()
+        if project not in V53_PROJECTS:
+            project = v53_detect_project(title + " " + note)
+        priority = str(a.get("priority", "")).strip()
+        if priority not in ["🔴 زیاد", "🟡 متوسط", "🟢 کم"]:
+            priority = v53_priority(title + " " + note)
+        if typ == "new_task" and title:
+            v53_insert_task(title[:180], update.effective_user.id, update.effective_user.id, priority, project, f"ساخته‌شده توسط مدیر هوشمند. دلیل: {a.get('reason','')}")
+            created += 1
+        elif typ == "add_note" and task and note:
+            v5_note(task['id'], update.effective_user.id, update.effective_user.full_name, note, "smart_ai", None)
+            v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "smart_add_note", "", note)
+            notes += 1
+        elif typ == "change_status" and task:
+            new_status = str(a.get("new_status", "")).strip()
+            if new_status in ["done", "waiting", "in_progress", "cancelled"]:
+                old = task.get('status')
+                v5_update(task['id'], "status", new_status)
+                if new_status == "done":
+                    v5_update(task['id'], "completed_at", v5_now())
+                v5_history(task['id'], update.effective_user.id, update.effective_user.full_name, "smart_status", old, new_status)
+                statuses += 1
+        elif typ == "advice" and note:
+            advices.append(note)
+
+    result = f"✅ تحلیل شد\n\n➕ کار جدید: {created}\n📝 شرح اضافه‌شده: {notes}\n✅ تغییر وضعیت: {statuses}"
+    await update.message.reply_text(result)
+    if advices:
+        advice_text = "\n\n".join(f"• {x}" for x in advices[:5])
+        aid = v53_store_advice(chat_id, advice_text)
+        await update.message.reply_text(
+            "🧠 کامنت مدیریتی دارم. نمایش بدهم؟",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ نمایش کامنت", callback_data=f"v53:showadvice:{aid}")]])
+        )
+    raise ApplicationHandlerStop
+
+
+
+
+async def v53_summary_cmd(update, context):
+    v53_clear_states(context)
+    await update.message.reply_text(
+        "🧠 بازه تحلیل چت را انتخاب کن:",
+        reply_markup=ReplyKeyboardMarkup([["⏱ یک ساعت اخیر", "⏱ دو ساعت اخیر"], ["📅 دیروز", "📊 ۷ روز اخیر"], ["⬅️بازگشت"]], resize_keyboard=True)
+    )
+    raise ApplicationHandlerStop
+
+
+async def v53_newtask_cmd(update, context):
+    v53_clear_states(context)
+    raw = " ".join(context.args).strip()
+    if not raw:
+        await update.message.reply_text("مثال: /newtask پیگیری مالی با حسابدار")
+        raise ApplicationHandlerStop
+    await v53_create_from_text(update, context, raw)
+
+async def v53_text_router(update, context):
+    if not update.message or not update.message.text:
+        return
+    await register_user(update)
+    v53_clear_states(context)
+    text = (update.message.text or "").strip()
+    v53_save_chat(update)
+
+    if text in ["📋 کارها", "لیست کارها", "کارها", "⏱ پیگیری"]:
+        await v53_send_list(update, context)
+    if text in ["➕ کار جدید", "کار جدید"]:
+        await update.message.reply_text("بنویس: کار جدید: عنوان کار")
+        raise ApplicationHandlerStop
+    if text in ["🧠 مدیر هوشمند", "مدیر هوشمند"]:
+        await v53_smart_cmd(update, context)
+    if text in ["📤 خروجی اکسل"]:
+        await v53_export_excel(update, context)
+    if text in ["🧠 تحلیل چت", "تحلیل چت"]:
+        await update.message.reply_text(
+            "🧠 بازه تحلیل چت را انتخاب کن:",
+            reply_markup=ReplyKeyboardMarkup([["⏱ یک ساعت اخیر", "⏱ دو ساعت اخیر"], ["📅 دیروز", "📊 ۷ روز اخیر"], ["⬅️بازگشت"]], resize_keyboard=True)
+        )
+        raise ApplicationHandlerStop
+    if text == "⏱ یک ساعت اخیر":
+        await summary_command(update, context, "1h"); raise ApplicationHandlerStop
+    if text == "⏱ دو ساعت اخیر":
+        await summary_command(update, context, "2h"); raise ApplicationHandlerStop
+    if text == "📅 دیروز":
+        await summary_command(update, context, "yesterday"); raise ApplicationHandlerStop
+    if text == "📊 ۷ روز اخیر":
+        await summary_command(update, context, "7d"); raise ApplicationHandlerStop
+    if text in ["📊 گزارش‌ها", "گزارش‌ها"]:
+        await update.message.reply_text("📊 گزارش‌ها", reply_markup=ReplyKeyboardMarkup([["📊 آمار", "📅 گزارش روزانه"], ["📤 خروجی اکسل", "📄 خروجی PDF"], ["⬅️بازگشت"]], resize_keyboard=True))
+        raise ApplicationHandlerStop
+    if text == "📊 آمار":
+        await stats(update, context); raise ApplicationHandlerStop
+    if text == "📅 گزارش روزانه":
+        await daily_report_command(update, context); raise ApplicationHandlerStop
+    if text == "📄 خروجی PDF":
+        await v5_export_pdf_cmd(update, context); raise ApplicationHandlerStop
+    if text in ["👥 اعضا", "اعضا"]:
+        await members(update, context); raise ApplicationHandlerStop
+    if text in ["👤 پروفایل", "پروفایل"]:
+        await whoami(update, context); raise ApplicationHandlerStop
+    if text in ["❓ راهنما", "راهنما"]:
+        await v53_help(update, context)
+    if text in ["🎙 فرمان صوتی", "فرمان صوتی"]:
+        await update.message.reply_text("🎙 ویس بفرست. مثال: لیست کارها / کار 1 انجام شد / کار جدید پیگیری مالی")
+        raise ApplicationHandlerStop
+    if text in ["🤖 دستیار هوشمند", "دستیار هوشمند"]:
+        USER_STATE[update.effective_user.id] = "ai_mode"
+        await update.message.reply_text("🤖 دستیار فعال شد. سوالت را بنویس. برای خروج /exit")
+        raise ApplicationHandlerStop
+    if USER_STATE.get(update.effective_user.id) == "ai_mode" and text not in ["/exit"]:
+        await ai_chat(update, context); raise ApplicationHandlerStop
+    if text in ["⬅️بازگشت", "بازگشت"]:
+        await v53_start(update, context)
+
+    rid = update.message.reply_to_message.message_id if update.message.reply_to_message else None
+    if rid:
+        tid = v5_task_by_msg(update.effective_chat.id, rid)
+        if tid:
+            await v53_add_note(update, tid, text, "reply")
+
+    m = re.search(r"کار\s*([0-9۰-۹٠-٩]+)\s*[:：\-]\s*(.+)", text)
+    if m:
+        await v53_add_note(update, int(fa_to_en_digits(m.group(1))), m.group(2).strip(), "text_note")
+
+    st = v53_status_from_text(text)
+    if st and ("کار" in text or "#" in text):
+        task = v53_find_task(text)
+        await v53_set_status(update, task, st)
+
+    if text.startswith(("کار جدید", "تسک جدید", "وظیفه جدید", "ثبت کار")):
+        raw = re.sub(r"^(کار جدید|تسک جدید|وظیفه جدید|ثبت کار)\s*[:：\-]?\s*", "", text).strip()
+        await v53_create_from_text(update, context, raw)
+
+    # پیام معمولی فقط ذخیره شود و وارد هندلرهای قدیمی نشود تا خطای زمان ندهد.
+    raise ApplicationHandlerStop
+
+
+async def v53_voice_handler(update, context):
+    await register_user(update)
+    v53_clear_states(context)
+    if not v53_has_openai_key():
+        await update.message.reply_text("❌ OPENAI_API_KEY تنظیم نشده")
+        raise ApplicationHandlerStop
+    try:
+        file = await context.bot.get_file(update.message.voice.file_id)
+        path = tempfile.mktemp(suffix=".ogg")
+        await file.download_to_drive(path)
+        with open(path, "rb") as f:
+            tr = client.audio.transcriptions.create(model=v53_transcribe_model(), file=f)
+        text = (tr.text or "").strip()
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطای تبدیل ویس: {e}")
+        raise ApplicationHandlerStop
+
+    await update.message.reply_text(f"📝 متن ویس:\n{text}")
+    # فرمان صوتی فقط وقتی صریح باشد کار جدید می‌سازد.
+    if any(w in text for w in ["لیست", "کارها رو", "کارها را", "کارها"]):
+        await v53_send_list(update, context, "📋 لیست کارها")
+    st = v53_status_from_text(text)
+    if st and "کار" in text:
+        task = v53_find_task(text)
+        await v53_set_status(update, task, st)
+    if "مدیر هوشمند" in text or "تحلیل" in text:
+        await v53_smart_cmd(update, context)
+    if any(w in text for w in ["کار جدید", "بساز", "ایجاد کن", "ثبت کن"]):
+        await v53_create_from_text(update, context, text)
+    task = v53_find_task(text)
+    if task and len(text) > 5:
+        await v53_add_note(update, task['id'], text, "voice_note")
+    await update.message.reply_text("فرمان مشخص نبود. برای ساخت کار بگو: کار جدید ... / برای وضعیت بگو: کار 1 انجام شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_file_handler(update, context):
+    if not update.message:
+        return
+    await register_user(update)
+    rid = update.message.reply_to_message.message_id if update.message.reply_to_message else None
+    if not rid:
+        await update.message.reply_text("برای ذخیره فایل، روی پیام همان کار Reply کن و عکس/فایل را بفرست.")
+        raise ApplicationHandlerStop
+    tid = v5_task_by_msg(update.effective_chat.id, rid)
+    if not tid:
+        await update.message.reply_text("این پیام به کاری وصل نیست.")
+        raise ApplicationHandlerStop
+    file_id = file_type = None
+    if update.message.document:
+        file_id = update.message.document.file_id; file_type = "document"
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id; file_type = "photo"
+    elif update.message.video:
+        file_id = update.message.video.file_id; file_type = "video"
+    elif update.message.audio:
+        file_id = update.message.audio.file_id; file_type = "audio"
+    if file_id:
+        conn = v5_conn(); cur = conn.cursor()
+        cur.execute("INSERT INTO task_files (task_id,user_id,full_name,file_id,file_type,caption,created_at) VALUES (?,?,?,?,?,?,?)", (tid, update.effective_user.id, update.effective_user.full_name, file_id, file_type, update.message.caption or "", v5_now()))
+        conn.commit(); conn.close()
+        v5_history(tid, update.effective_user.id, update.effective_user.full_name, "add_file", "", file_type)
+        await update.message.reply_text("✅ فایل ثبت شد")
+    raise ApplicationHandlerStop
+
+
+async def v53_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split(":")
+    if parts[0] != "v53":
+        return
+    action = parts[1]
+    if action == "none":
+        return
+    if action == "list":
+        await q.edit_message_text("📋 کارهای باز\n\nروی هر کار بزن تا منوی همان کار باز شود.", reply_markup=v53_list_keyboard())
+        raise ApplicationHandlerStop
+    if action == "open":
+        task_id = int(parts[2])
+        t = v5_task(task_id)
+        if not t:
+            await q.edit_message_text("❌ کار پیدا نشد")
+        else:
+            await q.edit_message_text(v53_task_text(t), reply_markup=v53_task_menu(task_id))
+        raise ApplicationHandlerStop
+    if action == "status":
+        task_id = int(parts[2]); status = parts[3]
+        t = v5_task(task_id)
+        if t:
+            v5_update(task_id, "status", status)
+            if status == "done":
+                v5_update(task_id, "completed_at", v5_now())
+            v5_history(task_id, q.from_user.id, q.from_user.full_name, "status_button", t.get('status'), status)
+            if status in ["cancelled", "done"]:
+                await q.edit_message_text("✅ ثبت شد", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ لیست", callback_data="v53:list")]]))
+            else:
+                await q.edit_message_text(v53_task_text(v5_task(task_id)), reply_markup=v53_task_menu(task_id))
+        raise ApplicationHandlerStop
+    if action == "projectmenu":
+        task_id = int(parts[2])
+        await q.edit_message_text("📁 پروژه را انتخاب کن:", reply_markup=v53_project_keyboard(task_id))
+        raise ApplicationHandlerStop
+    if action == "setproject":
+        task_id = int(parts[2]); idx = int(parts[3])
+        project = V53_PROJECTS[idx]
+        v5_update(task_id, "project", project)
+        v5_history(task_id, q.from_user.id, q.from_user.full_name, "project", "", project)
+        await q.edit_message_text(v53_task_text(v5_task(task_id)), reply_markup=v53_task_menu(task_id))
+        raise ApplicationHandlerStop
+    if action == "notes":
+        task_id = int(parts[2])
+        rows = v5_notes(task_id, 20)
+        text = f"📝 شرح‌های کار #{task_id}\n\n" + ("شرحی ثبت نشده." if not rows else "\n\n".join(f"{r[0]} | {r[1]}:\n{r[2]}" for r in rows))
+        await q.message.reply_text(text)
+        raise ApplicationHandlerStop
+    if action == "history":
+        task_id = int(parts[2])
+        rows = v5_histories(task_id, 20)
+        text = f"🧾 تاریخچه کار #{task_id}\n\n" + ("تاریخچه‌ای ثبت نشده." if not rows else "\n".join(f"{r[0]} | {r[1]} | {r[2]}" for r in rows))
+        await q.message.reply_text(text)
+        raise ApplicationHandlerStop
+    if action == "files":
+        task_id = int(parts[2])
+        conn = v5_conn(); cur = conn.cursor()
+        cur.execute("SELECT id,created_at,full_name,file_type,caption FROM task_files WHERE task_id=? ORDER BY id DESC LIMIT 20", (task_id,))
+        rows = cur.fetchall(); conn.close()
+        text = f"📎 فایل‌های کار #{task_id}\n\n" + ("فایلی ثبت نشده. روی پیام کار Reply کن و عکس/فایل بفرست." if not rows else "\n".join(f"#{r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4] or '-'}" for r in rows))
+        await q.message.reply_text(text)
+        raise ApplicationHandlerStop
+    if action == "showadvice":
+        aid = int(parts[2])
+        row = v53_get_advice(aid)
+        if row:
+            await q.edit_message_text("🧠 کامنت مدیریتی:\n\n" + row[2])
+        raise ApplicationHandlerStop
+
+
+# راه‌اندازی و هندلرهای نسخه ۵.۳
+v53_init_db()
+app.add_handler(CommandHandler("start", v53_start), group=-10)
+app.add_handler(CommandHandler("help", v53_help), group=-10)
+app.add_handler(CommandHandler("tasks", v53_tasks_cmd), group=-10)
+app.add_handler(CommandHandler("followup", v53_followup_cmd), group=-10)
+app.add_handler(CommandHandler("today", v53_today_cmd), group=-10)
+app.add_handler(CommandHandler("done", v53_done_cmd), group=-10)
+app.add_handler(CommandHandler("delete", v53_delete_cmd), group=-10)
+app.add_handler(CommandHandler("remind", v53_remind_cmd), group=-10)
+app.add_handler(CommandHandler("smart", v53_smart_cmd), group=-10)
+app.add_handler(CommandHandler("summary", v53_summary_cmd), group=-10)
+app.add_handler(CommandHandler("newtask", v53_newtask_cmd), group=-10)
+app.add_handler(CommandHandler("new", v53_newtask_cmd), group=-10)
+app.add_handler(CommandHandler("export_excel", v53_export_excel), group=-10)
+app.add_handler(CallbackQueryHandler(v53_callback, pattern="^v53:"), group=-10)
+app.add_handler(MessageHandler(filters.VOICE, v53_voice_handler), group=-10)
+app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, v53_file_handler), group=-10)
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v53_text_router), group=-10)
+
+# =================== END V5.3 CLEAN GROUP + SMART FIX ===================
+
 if __name__ == "__main__":
 
     print("SAM PRO Team Manager Started...")
