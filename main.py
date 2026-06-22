@@ -3010,7 +3010,7 @@ if __name__ == "__main__":
 
     app.job_queue.run_daily(
     send_daily_report_job,
-    time=datetime.strptime("21:00", "%H:%M").time(),
+    time=datetime.strptime("07:40", "%H:%M").time(),
     name="daily_report"
 )
     app.run_polling(drop_pending_updates=True)
