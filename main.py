@@ -1473,7 +1473,7 @@ async def silent_message_watcher(
     if counter >= 5:
         context.chat_data["silent_counter"] = 0
         await silent_ai_analyze(update, context)
-    def get_chat_messages_between(chat_id, start_time, end_time):
+ def get_chat_messages_between(chat_id, start_time, end_time):
 
     conn = sqlite3.connect("sam_pro.db")
     cur = conn.cursor()
