@@ -522,15 +522,18 @@ async def create_task_reminder(
             context.user_data.pop("waiting_custom_reminder", None)
 
         except:
+            context.user_data.pop("waiting_custom_reminder", None)
             await update.message.reply_text(
                 """
 ❌ فرمت زمان اشتباه است.
 
 مثال درست:
 2026-06-25 18:00
+
+حالت تنظیم زمان بسته شد تا ربات روی پیام‌های بعدی گیر نکند.
 """
             )
-            return CREATE_REMINDER
+            return ConversationHandler.END
 
     elif reminder_choice == "⏰ یک ساعت بعد":
 
@@ -565,11 +568,12 @@ async def create_task_reminder(
 
     else:
 
+        context.user_data.pop("waiting_custom_reminder", None)
         await update.message.reply_text(
-            "لطفاً یکی از دکمه‌ها را انتخاب کن."
+            "❌ انتخاب یادآوری نامعتبر بود. حالت ساخت کار بسته شد. برای ساخت دوباره /newtask را بزن."
         )
 
-        return CREATE_REMINDER
+        return ConversationHandler.END
 
     reminder_text = (
         "بدون یادآوری"
@@ -2243,15 +2247,18 @@ async def task_draft_text_input(
             draft["reminder_text"] = text
 
         except:
+            context.user_data.pop("task_draft_waiting", None)
             await update.message.reply_text(
                 """
 ❌ فرمت زمان اشتباه است.
 
 مثال درست:
 2026-06-25 18:00
+
+حالت تنظیم زمان بسته شد تا ربات روی پیام‌های بعدی گیر نکند.
 """
             )
-            raise ApplicationHandlerStop
+            return
 
     context.user_data.pop("task_draft_waiting", None)
 
@@ -3534,9 +3541,214 @@ async def v5_smart_cmd(update,context):
     await update.message.reply_text('🧠 مدیر هوشمند در حال بررسی چت و کارهای باز است...')
     # از تحلیل قبلی موجود در فایل اصلی هم استفاده می‌کنیم تا چیزی حذف نشود
     try:
-        await silent_ai_analyze(update, context, update.effective_chat.id)
+        await silent_ai_analyze(update, context)
     except Exception as e:
         await update.message.reply_text(f'تحلیل هوشمند ساده اجرا شد، ولی خطای بخش قدیمی: {e}')
+
+
+
+# =================== V5.2 COMMAND + STUCK STATE FIX ===================
+
+def v52_clear_waiting_states(context):
+    """پاک کردن حالت‌های نیمه‌کاره تا هر پیام معمولی به خطای زمان تبدیل نشود."""
+    for key in [
+        "waiting_custom_reminder",
+        "task_draft_waiting",
+        "waiting_note_task_id",
+        "waiting_check_task_id",
+        V5_NOTE_WAIT,
+    ]:
+        try:
+            context.user_data.pop(key, None)
+        except Exception:
+            pass
+
+
+def v52_parse_reminder_text(raw: str):
+    raw = (raw or "").strip()
+    raw_l = raw.lower()
+    now = datetime.now()
+
+    if raw_l in ["none", "no", "off", "disable"] or raw in ["بدون", "بدون یادآوری", "حذف", "خاموش"]:
+        return "none"
+
+    m = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2})[:.](\d{2})", fa_to_en_digits(raw))
+    if m:
+        y, mo, d, h, mi = map(int, m.groups())
+        return datetime(y, mo, d, h, mi).strftime("%Y-%m-%d %H:%M")
+
+    hm = re.search(r"(\d{1,2})[:.](\d{2})", fa_to_en_digits(raw))
+    if "فردا" in raw:
+        base = now + timedelta(days=1)
+        if hm:
+            return base.replace(hour=int(hm.group(1)), minute=int(hm.group(2)), second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+        return base.replace(hour=10, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+    if "امروز" in raw:
+        if hm:
+            return now.replace(hour=int(hm.group(1)), minute=int(hm.group(2)), second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+        return now.strftime("%Y-%m-%d %H:%M")
+    if "یک ساعت" in raw:
+        return (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    if "دو ساعت" in raw:
+        return (now + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+    if "سه ساعت" in raw:
+        return (now + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+
+    return None
+
+
+async def v52_start_cmd(update, context):
+    v52_clear_waiting_states(context)
+    await start(update, context)
+    raise ApplicationHandlerStop
+
+
+async def v52_help_cmd(update, context):
+    v52_clear_waiting_states(context)
+    await update.message.reply_text(
+        """❓ راهنمای سریع SAM PRO
+
+📋 لیست کارها:
+/tasks
+
+✅ انجام کار:
+/done 1
+یا: کار 1 انجام شد
+
+🗑 حذف کار:
+/delete 1
+
+⏰ تنظیم یادآوری:
+/remind 1 2026-06-25 18:00
+/remind 1 فردا 10:00
+/remind 1 none
+
+🧠 تحلیل چت:
+/summary
+
+🧠 مدیر هوشمند:
+/smart
+
+📤 خروجی:
+/export_excel
+/export_pdf""",
+        reply_markup=ReplyKeyboardMarkup(
+            [["➕ کار جدید", "📋 کارها"], ["🧠 تحلیل چت", "🧠 مدیر هوشمند"], ["📊 آمار", "👥 اعضا"], ["👤 پروفایل", "❓ راهنما"]],
+            resize_keyboard=True,
+        ),
+    )
+    raise ApplicationHandlerStop
+
+
+async def v52_tasks_panel_cmd(update, context):
+    v52_clear_waiting_states(context)
+    await update.message.reply_text(
+        "📋 لیست کارهای باز:\n\nروی هر کار بزن تا منوی همان کار باز شود.",
+        reply_markup=task_list_keyboard(),
+    )
+    raise ApplicationHandlerStop
+
+
+async def v52_today_cmd(update, context):
+    v52_clear_waiting_states(context)
+    today = datetime.now().strftime("%Y-%m-%d")
+    tasks = []
+    for t in v5_tasks(False, 200):
+        if str(t.get("created_at") or "").startswith(today) or str(t.get("reminder_time") or "").startswith(today):
+            tasks.append(t)
+    if not tasks:
+        await update.message.reply_text("📅 برای امروز کاری پیدا نشد.")
+    else:
+        await update.message.reply_text("📅 کارهای امروز")
+        for t in tasks[:15]:
+            await v5_send_card(context, update.effective_chat.id, t["id"])
+    raise ApplicationHandlerStop
+
+
+async def v52_done_cmd(update, context):
+    v52_clear_waiting_states(context)
+    if not context.args:
+        await update.message.reply_text("مثال درست:\n/done 1")
+        raise ApplicationHandlerStop
+    task_id = extract_task_id(" ".join(context.args))
+    t = v5_task(task_id) if task_id else None
+    if not t:
+        await update.message.reply_text("❌ کار پیدا نشد. شماره کار را بفرست. مثال: /done 1")
+        raise ApplicationHandlerStop
+    old = t["status"]
+    v5_update(task_id, "status", "done")
+    v5_update(task_id, "completed_at", v5_now())
+    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "done_command", old, "done")
+    await update.message.reply_text(f"✅ کار #{task_id} انجام‌شده شد.")
+    raise ApplicationHandlerStop
+
+
+async def v52_delete_cmd(update, context):
+    v52_clear_waiting_states(context)
+    if not context.args:
+        await update.message.reply_text("مثال درست:\n/delete 1")
+        raise ApplicationHandlerStop
+    task_id = extract_task_id(" ".join(context.args))
+    t = v5_task(task_id) if task_id else None
+    if not t:
+        await update.message.reply_text("❌ کار پیدا نشد. شماره کار را بفرست. مثال: /delete 1")
+        raise ApplicationHandlerStop
+    v5_update(task_id, "deleted", 1)
+    v5_update(task_id, "status", "cancelled")
+    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "delete_command", "", "deleted")
+    await update.message.reply_text(f"🗑 کار #{task_id} حذف/لغو شد.")
+    raise ApplicationHandlerStop
+
+
+async def v52_remind_cmd(update, context):
+    v52_clear_waiting_states(context)
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            """⏰ برای تنظیم یادآوری اینطوری بزن:
+
+/remind 1 2026-06-25 18:00
+/remind 1 فردا 10:00
+/remind 1 امروز 22:30
+/remind 1 سه ساعت بعد
+/remind 1 none"""
+        )
+        raise ApplicationHandlerStop
+
+    task_id = extract_task_id(context.args[0])
+    t = v5_task(task_id) if task_id else None
+    if not t:
+        await update.message.reply_text("❌ کار پیدا نشد. مثال: /remind 1 2026-06-25 18:00")
+        raise ApplicationHandlerStop
+
+    raw_time = " ".join(context.args[1:])
+    reminder_time = v52_parse_reminder_text(raw_time)
+    if reminder_time is None:
+        await update.message.reply_text("❌ فرمت زمان اشتباه است. مثال درست:\n/remind 1 2026-06-25 18:00")
+        raise ApplicationHandlerStop
+
+    old = t.get("reminder_time")
+    v5_update(task_id, "reminder_time", reminder_time)
+    v5_history(task_id, update.effective_user.id, update.effective_user.full_name, "remind_command", old, reminder_time)
+    shown = "بدون یادآوری" if reminder_time == "none" else reminder_time
+    await update.message.reply_text(f"⏰ یادآوری کار #{task_id} تنظیم شد:\n{shown}")
+    raise ApplicationHandlerStop
+
+
+async def v52_followup_cmd(update, context):
+    v52_clear_waiting_states(context)
+    await update.message.reply_text(
+        "⏱ پیگیری کارهای باز:\n\nروی هر کار بزن تا منوی همان کار باز شود.",
+        reply_markup=task_list_keyboard(),
+    )
+    raise ApplicationHandlerStop
+
+
+async def v52_smart_cmd(update, context):
+    v52_clear_waiting_states(context)
+    await v5_smart_cmd(update, context)
+    raise ApplicationHandlerStop
+
+# =================== END V5.2 COMMAND + STUCK STATE FIX ===================
 
 # =================== END V5 REAL MERGE ADDON ===================
 
@@ -3808,6 +4020,17 @@ app.add_handler(
     group=2
 )
 
+
+# V5.2 priority command handlers: these run before old handlers and stop duplicate replies
+app.add_handler(CommandHandler("start", v52_start_cmd), group=-2)
+app.add_handler(CommandHandler("help", v52_help_cmd), group=-2)
+app.add_handler(CommandHandler("tasks", v52_tasks_panel_cmd), group=-2)
+app.add_handler(CommandHandler("today", v52_today_cmd), group=-2)
+app.add_handler(CommandHandler("done", v52_done_cmd), group=-2)
+app.add_handler(CommandHandler("delete", v52_delete_cmd), group=-2)
+app.add_handler(CommandHandler("remind", v52_remind_cmd), group=-2)
+app.add_handler(CommandHandler("followup", v52_followup_cmd), group=-2)
+app.add_handler(CommandHandler("smart", v52_smart_cmd), group=-2)
 
 # V5 Real Merge handlers
 app.add_handler(CommandHandler("v5help", v5_help_cmd))
