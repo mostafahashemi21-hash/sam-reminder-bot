@@ -2294,7 +2294,7 @@ def get_open_tasks_for_panel():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at
+        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at, project, tag
         FROM tasks
         WHERE status NOT IN ('done', 'cancelled')
         ORDER BY id DESC
@@ -2312,7 +2312,7 @@ def get_task_by_id(task_id):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at
+        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at, project, tag
         FROM tasks
         WHERE id=?
     """, (task_id,))
