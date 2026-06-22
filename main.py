@@ -1001,6 +1001,15 @@ def save_chat_message(update: Update):
     conn = sqlite3.connect("sam_pro.db")
     cur = conn.cursor()
 
+    cutoff = (
+        datetime.now() - timedelta(days=7)
+    ).strftime("%Y-%m-%d %H:%M")
+
+    cur.execute("""
+        DELETE FROM chat_messages
+        WHERE created_at < ?
+    """, (cutoff,))
+
     cur.execute("""
         INSERT INTO chat_messages (
             chat_id,
