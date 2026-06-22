@@ -2145,6 +2145,271 @@ async def join_command(
 از این به بعد می‌شود این شخص را به‌عنوان مسئول کار انتخاب کرد.
 """
     )
+def get_open_tasks_for_panel():
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at
+        FROM tasks
+        WHERE status NOT IN ('done', 'cancelled')
+        ORDER BY id DESC
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return rows
+
+
+def get_task_by_id(task_id):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, title, assigned_to, assigned_by, priority, status, reminder_time, created_at
+        FROM tasks
+        WHERE id=?
+    """, (task_id,))
+
+    row = cur.fetchone()
+    conn.close()
+
+    return row
+
+
+def task_list_keyboard():
+
+    tasks = get_open_tasks_for_panel()
+
+    keyboard = []
+
+    if not tasks:
+        keyboard.append([
+            InlineKeyboardButton(
+                "✅ کار بازی وجود ندارد",
+                callback_data="taskmenu:none"
+            )
+        ])
+    else:
+        for task in tasks:
+            task_id = task[0]
+            title = task[1]
+            priority = task[4]
+            status = task[5]
+
+            status_fa = STATUS_TEXT.get(status, status)
+
+            short_title = title[:35]
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"#{task_id} | {priority} | {status_fa} | {short_title}",
+                    callback_data=f"taskmenu:open:{task_id}"
+                )
+            ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def open_tasks_panel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "📋 لیست کارهای باز:",
+        reply_markup=task_list_keyboard()
+    )
+
+
+def single_task_keyboard(task_id):
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ انجام شد",
+                callback_data=f"taskmenu:status:{task_id}:done"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 در حال پیگیری",
+                callback_data=f"taskmenu:status:{task_id}:in_progress"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⏳ منتظر پاسخ",
+                callback_data=f"taskmenu:status:{task_id}:waiting"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 حذف از لیست",
+                callback_data=f"taskmenu:status:{task_id}:cancelled"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ برگشت به لیست",
+                callback_data="taskmenu:list"
+            )
+        ]
+    ])
+
+
+def single_task_text(task):
+
+    task_id = task[0]
+    title = task[1]
+    assigned_to = task[2]
+    assigned_by = task[3]
+    priority = task[4]
+    status = task[5]
+    reminder_time = task[6]
+    created_at = task[7]
+
+    status_fa = STATUS_TEXT.get(status, status)
+
+    reminder_text = (
+        "بدون یادآوری"
+        if reminder_time == "none"
+        else reminder_time
+    )
+
+    return f"""
+📌 جزئیات کار
+
+🆔 شناسه:
+{task_id}
+
+📝 عنوان:
+{title}
+
+👤 مسئول:
+{assigned_to}
+
+👨‍💼 ثبت‌کننده:
+{assigned_by}
+
+🔥 اولویت:
+{priority}
+
+📍 وضعیت:
+{status_fa}
+
+⏰ یادآوری:
+{reminder_text}
+
+🕒 تاریخ ثبت:
+{created_at}
+"""
+
+
+async def task_menu_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.split(":")
+
+    if query.data == "taskmenu:none":
+        return
+
+    if query.data == "taskmenu:list":
+
+        await query.edit_message_text(
+            "📋 لیست کارهای باز:",
+            reply_markup=task_list_keyboard()
+        )
+
+        return
+
+    if len(data) >= 3 and data[1] == "open":
+
+        task_id = int(data[2])
+
+        task = get_task_by_id(task_id)
+
+        if not task:
+            await query.edit_message_text(
+                "❌ این کار پیدا نشد."
+            )
+            return
+
+        await query.edit_message_text(
+            single_task_text(task),
+            reply_markup=single_task_keyboard(task_id)
+        )
+
+        return
+
+    if len(data) >= 4 and data[1] == "status":
+
+        task_id = int(data[2])
+        new_status = data[3]
+
+        conn = sqlite3.connect("sam_pro.db")
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE tasks
+            SET status=?
+            WHERE id=?
+        """, (
+            new_status,
+            task_id
+        ))
+
+        conn.commit()
+        conn.close()
+
+        if new_status == "cancelled":
+
+            await query.edit_message_text(
+                "🗑 کار از لیست حذف شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ برگشت به لیست",
+                            callback_data="taskmenu:list"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        if new_status == "done":
+
+            await query.edit_message_text(
+                "✅ کار انجام‌شده ثبت شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ برگشت به لیست",
+                            callback_data="taskmenu:list"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        task = get_task_by_id(task_id)
+
+        await query.edit_message_text(
+            single_task_text(task),
+            reply_markup=single_task_keyboard(task_id)
+        )
+
+        return
 
 init_db()
 init_silent_ai_tables()
