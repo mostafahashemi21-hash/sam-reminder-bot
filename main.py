@@ -1608,6 +1608,496 @@ async def summary_command(
 
     await update.message.reply_text(answer)    
 
+TASK_DRAFTS = {}
+
+
+def get_task_draft(user_id):
+
+    if user_id not in TASK_DRAFTS:
+        TASK_DRAFTS[user_id] = {
+            "title": "",
+            "assigned_to": None,
+            "member_name": "",
+            "priority": "🟡 متوسط",
+            "reminder_time": "none",
+            "reminder_text": "بدون یادآوری",
+            "panel_chat_id": None,
+            "panel_message_id": None
+        }
+
+    return TASK_DRAFTS[user_id]
+
+
+def task_panel_text(draft):
+
+    title = draft["title"] if draft["title"] else "ثبت نشده"
+
+    member = (
+        f'{draft["member_name"]} | ID: {draft["assigned_to"]}'
+        if draft["assigned_to"]
+        else "ثبت نشده"
+    )
+
+    return f"""
+🧾 پنل ایجاد کار
+
+📝 عنوان کار:
+{title}
+
+👤 مسئول / پیگیری‌کننده:
+{member}
+
+🔥 اولویت:
+{draft["priority"]}
+
+⏰ یادآوری:
+{draft["reminder_text"]}
+"""
+
+
+def task_panel_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📝 عنوان کار",
+                callback_data="draft:title"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "👤 مسئول",
+                callback_data="draft:members"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔥 اولویت",
+                callback_data="draft:priority_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⏰ یادآوری",
+                callback_data="draft:reminder_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ ثبت کار",
+                callback_data="draft:save"
+            ),
+            InlineKeyboardButton(
+                "❌ لغو",
+                callback_data="draft:cancel"
+            )
+        ]
+    ])
+
+
+async def open_task_panel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await register_user(update)
+
+    user = get_user(update.effective_user.id)
+
+    if not user or user[3] != "admin":
+        await update.message.reply_text(
+            "فقط مدیر می‌تواند کار ایجاد کند."
+        )
+        return
+
+    draft = get_task_draft(update.effective_user.id)
+
+    msg = await update.message.reply_text(
+        task_panel_text(draft),
+        reply_markup=task_panel_keyboard()
+    )
+
+    draft["panel_chat_id"] = msg.chat_id
+    draft["panel_message_id"] = msg.message_id
+
+
+async def edit_task_panel(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id,
+    extra_text=""
+):
+
+    draft = get_task_draft(user_id)
+
+    text = task_panel_text(draft)
+
+    if extra_text:
+        text += f"\n\n{extra_text}"
+
+    await context.bot.edit_message_text(
+        chat_id=draft["panel_chat_id"],
+        message_id=draft["panel_message_id"],
+        text=text,
+        reply_markup=task_panel_keyboard()
+    )
+
+
+async def task_draft_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    draft = get_task_draft(user_id)
+
+    data = query.data
+
+    if data == "draft:title":
+
+        context.user_data["task_draft_waiting"] = "title"
+
+        await query.edit_message_text(
+            task_panel_text(draft)
+            + "\n\n📝 عنوان کار را در پیام بعدی بنویس:",
+            reply_markup=task_panel_keyboard()
+        )
+
+        return
+
+    if data == "draft:members":
+
+        users = get_users()
+
+        keyboard = []
+
+        for user in users:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{user[2]} | ID: {user[0]}",
+                    callback_data=f"draft:member:{user[0]}"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "⬅️ برگشت",
+                callback_data="draft:back"
+            )
+        ])
+
+        await query.edit_message_text(
+            "👤 مسئول / پیگیری‌کننده را انتخاب کن:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        return
+
+    if data.startswith("draft:member:"):
+
+        selected_id = int(data.split(":")[2])
+
+        users = get_users()
+
+        selected_name = ""
+
+        for user in users:
+            if user[0] == selected_id:
+                selected_name = user[2]
+                break
+
+        draft["assigned_to"] = selected_id
+        draft["member_name"] = selected_name
+
+        await query.edit_message_text(
+            task_panel_text(draft),
+            reply_markup=task_panel_keyboard()
+        )
+
+        return
+
+    if data == "draft:priority_menu":
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔴 زیاد",
+                    callback_data="draft:priority:🔴 زیاد"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🟡 متوسط",
+                    callback_data="draft:priority:🟡 متوسط"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🟢 کم",
+                    callback_data="draft:priority:🟢 کم"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ برگشت",
+                    callback_data="draft:back"
+                )
+            ]
+        ])
+
+        await query.edit_message_text(
+            "🔥 اولویت را انتخاب کن:",
+            reply_markup=keyboard
+        )
+
+        return
+
+    if data.startswith("draft:priority:"):
+
+        priority = data.replace("draft:priority:", "")
+
+        draft["priority"] = priority
+
+        await query.edit_message_text(
+            task_panel_text(draft),
+            reply_markup=task_panel_keyboard()
+        )
+
+        return
+
+    if data == "draft:reminder_menu":
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⏰ یک ساعت بعد",
+                    callback_data="draft:reminder:1h"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⏰ دو ساعت بعد",
+                    callback_data="draft:reminder:2h"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🕒 مشخص کردن زمان",
+                    callback_data="draft:reminder:custom"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🚫 بدون یادآوری",
+                    callback_data="draft:reminder:none"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ برگشت",
+                    callback_data="draft:back"
+                )
+            ]
+        ])
+
+        await query.edit_message_text(
+            "⏰ زمان یادآوری را انتخاب کن:",
+            reply_markup=keyboard
+        )
+
+        return
+
+    if data.startswith("draft:reminder:"):
+
+        reminder = data.split(":")[2]
+
+        if reminder == "1h":
+
+            draft["reminder_time"] = (
+                datetime.now() + timedelta(hours=1)
+            ).strftime("%Y-%m-%d %H:%M")
+
+            draft["reminder_text"] = "یک ساعت بعد"
+
+        elif reminder == "2h":
+
+            draft["reminder_time"] = (
+                datetime.now() + timedelta(hours=2)
+            ).strftime("%Y-%m-%d %H:%M")
+
+            draft["reminder_text"] = "دو ساعت بعد"
+
+        elif reminder == "none":
+
+            draft["reminder_time"] = "none"
+            draft["reminder_text"] = "بدون یادآوری"
+
+        elif reminder == "custom":
+
+            context.user_data["task_draft_waiting"] = "reminder"
+
+            await query.edit_message_text(
+                task_panel_text(draft)
+                + """
+
+🕒 زمان یادآوری را در پیام بعدی وارد کن.
+
+مثال:
+2026-06-25 18:00
+""",
+                reply_markup=task_panel_keyboard()
+            )
+
+            return
+
+        await query.edit_message_text(
+            task_panel_text(draft),
+            reply_markup=task_panel_keyboard()
+        )
+
+        return
+
+    if data == "draft:back":
+
+        await query.edit_message_text(
+            task_panel_text(draft),
+            reply_markup=task_panel_keyboard()
+        )
+
+        return
+
+    if data == "draft:cancel":
+
+        TASK_DRAFTS.pop(user_id, None)
+
+        await query.edit_message_text(
+            "❌ ایجاد کار لغو شد."
+        )
+
+        return
+
+    if data == "draft:save":
+
+        if not draft["title"]:
+            await query.edit_message_text(
+                task_panel_text(draft)
+                + "\n\n⚠️ اول عنوان کار را وارد کن.",
+                reply_markup=task_panel_keyboard()
+            )
+            return
+
+        if not draft["assigned_to"]:
+            await query.edit_message_text(
+                task_panel_text(draft)
+                + "\n\n⚠️ اول مسئول / پیگیری‌کننده را انتخاب کن.",
+                reply_markup=task_panel_keyboard()
+            )
+            return
+
+        create_task(
+            title=draft["title"],
+            assigned_to=draft["assigned_to"],
+            assigned_by=query.from_user.id,
+            priority=draft["priority"],
+            reminder_time=draft["reminder_time"],
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+
+        await query.edit_message_text(
+            f"""
+✅ کار ثبت شد
+
+📝 عنوان:
+{draft["title"]}
+
+👤 مسئول:
+{draft["member_name"]}
+
+🔥 اولویت:
+{draft["priority"]}
+
+⏰ یادآوری:
+{draft["reminder_text"]}
+"""
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=draft["assigned_to"],
+                text=f"""
+📌 کار جدید
+
+📝 عنوان:
+{draft["title"]}
+
+🔥 اولویت:
+{draft["priority"]}
+
+⏰ یادآوری:
+{draft["reminder_text"]}
+"""
+            )
+        except:
+            pass
+
+        TASK_DRAFTS.pop(user_id, None)
+
+        return
+
+
+async def task_draft_text_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    waiting = context.user_data.get("task_draft_waiting")
+
+    if not waiting:
+        return
+
+    user_id = update.effective_user.id
+    draft = get_task_draft(user_id)
+
+    text = update.message.text.strip()
+
+    if waiting == "title":
+
+        draft["title"] = text
+
+    elif waiting == "reminder":
+
+        try:
+            datetime.strptime(text, "%Y-%m-%d %H:%M")
+            draft["reminder_time"] = text
+            draft["reminder_text"] = text
+
+        except:
+            await update.message.reply_text(
+                """
+❌ فرمت زمان اشتباه است.
+
+مثال درست:
+2026-06-25 18:00
+"""
+            )
+            raise ApplicationHandlerStop
+
+    context.user_data.pop("task_draft_waiting", None)
+
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    await edit_task_panel(
+        context,
+        user_id
+    )
+
+    raise ApplicationHandlerStop
+
 init_db()
 init_silent_ai_tables()
 
