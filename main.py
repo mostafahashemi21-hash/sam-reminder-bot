@@ -118,7 +118,39 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             print(f"Reminder send error for task {task_id}: {e}")
+        if GROUP_CHAT_ID:
 
+            group_text = f"""
+⏰ یادآوری گروهی کار
+
+👤 مسئول:
+<a href="tg://user?id={assigned_to}">مسئول کار</a>
+
+🆔 شناسه کار:
+{task_id}
+
+📌 عنوان:
+{title}
+
+🔥 اولویت:
+{priority}
+
+📍 وضعیت فعلی:
+{status_fa}
+
+لطفاً وضعیت این کار مشخص شود.
+"""
+
+            try:
+                await context.bot.send_message(
+                    chat_id=GROUP_CHAT_ID,
+                    text=group_text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                print(f"Group reminder error for task {task_id}: {e}")
+                
 async def task_status_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
