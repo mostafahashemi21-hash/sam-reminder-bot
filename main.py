@@ -2789,12 +2789,6 @@ app.add_handler(
     )
 )
 
-app.add_handler(
-    CommandHandler(
-        "dailyreport",
-        daily_report_command
-    )
-)
 
 app.add_handler(
     CommandHandler(
@@ -2807,6 +2801,13 @@ app.add_handler(
     CommandHandler(
         "stats",
         stats
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "dailyreport",
+     daily_report_command
     )
 )
 
