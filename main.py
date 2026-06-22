@@ -2138,6 +2138,31 @@ async def task_draft_callback(
             reminder_time=draft["reminder_time"],
             created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
         )
+        conn = sqlite3.connect("sam_pro.db")
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE tasks
+            SET project=?, tag=?
+            WHERE id = (
+                SELECT id
+                FROM tasks
+                WHERE title=?
+                AND assigned_to=?
+                AND assigned_by=?
+                ORDER BY id DESC
+                LIMIT 1
+            )
+        """, (
+            draft["project"],
+            draft["tag"],
+            draft["title"],
+            draft["assigned_to"],
+            query.from_user.id
+        ))
+
+        conn.commit()
+        conn.close()
 
         await query.edit_message_text(
             f"""
