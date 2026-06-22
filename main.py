@@ -204,6 +204,11 @@ USER_STATE = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
+
+if GROUP_CHAT_ID:
+    GROUP_CHAT_ID = int(GROUP_CHAT_ID)
+
 print("BOT_TOKEN loaded:", bool(TOKEN), TOKEN[-6:] if TOKEN else "NO TOKEN")
 
 client = OpenAI(
