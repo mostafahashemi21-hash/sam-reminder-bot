@@ -57,8 +57,8 @@ def init_db() -> None:
         assigned_to INTEGER,
         assigned_by INTEGER,
         status TEXT DEFAULT 'pending',
-        priority TEXT DEFAULT 'ÙØªÙØ³Ø·',
-        project TEXT DEFAULT 'ØºÛØ±Ù',
+        priority TEXT DEFAULT 'متوسط',
+        project TEXT DEFAULT 'غیره',
         tag TEXT DEFAULT '',
         reminder_time TEXT DEFAULT 'none',
         reminder_repeat TEXT DEFAULT 'none',
@@ -73,7 +73,7 @@ def init_db() -> None:
     # Safe migration for older databases.
     for col, definition in {
         "description": "TEXT DEFAULT ''",
-        "project": "TEXT DEFAULT 'ØºÛØ±Ù'",
+        "project": "TEXT DEFAULT 'غیره'",
         "tag": "TEXT DEFAULT ''",
         "reminder_repeat": "TEXT DEFAULT 'none'",
         "updated_at": "TEXT",
@@ -243,11 +243,11 @@ def create_task(
     title: str,
     assigned_to: Optional[int],
     assigned_by: Optional[int],
-    priority: str = "ÙØªÙØ³Ø·",
+    priority: str = "متوسط",
     reminder_time: str = "none",
     created_at: Optional[str] = None,
     description: str = "",
-    project: str = "ØºÛØ±Ù",
+    project: str = "غیره",
     tag: str = "",
     reminder_repeat: str = "none",
 ) -> int:
@@ -490,8 +490,8 @@ def save_ai_suggestion(
     title: str = "",
     note: str = "",
     new_status: str = "",
-    priority: str = "ÙØªÙØ³Ø·",
-    project: str = "ØºÛØ±Ù",
+    priority: str = "متوسط",
+    project: str = "غیره",
     assigned_to: Optional[int] = None,
     assigned_to_name: str = "",
     reason: str = "",
@@ -533,12 +533,3 @@ def update_ai_suggestion_status(suggestion_id: int, status: str, decided_by: Opt
     """, (status, decided_by, now_str(), suggestion_id))
     conn.commit()
     conn.close()
-
-
-def get_admin_ids():
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE role='admin'")
-    rows = cur.fetchall()
-    conn.close()
-    return [int(row[0]) for row in rows]
