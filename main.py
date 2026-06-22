@@ -2737,11 +2737,8 @@ def get_daily_report_text():
 📌 آخرین کارهای باز:
 {latest_text}
 """
-async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text(get_daily_report_text())
 
-    report = get_daily_report_text()
-
-    await update.message.reply_text(report)
 init_db()
 init_silent_ai_tables()
 init_task_metadata_columns()
