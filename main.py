@@ -2946,6 +2946,14 @@ app.add_handler(
         buttons
     )
 )
+
+app.add_handler(
+    MessageHandler(
+        filters.Regex("^🎙 کار با ویس$"),
+        buttons
+    )
+)
+
 app.add_handler(
     MessageHandler(
         filters.Regex("^⏱ پیگیری$"),
