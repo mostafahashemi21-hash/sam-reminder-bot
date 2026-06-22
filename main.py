@@ -3260,11 +3260,18 @@ async def handle_voice_command(
 
         return True
 
-    if (
-        "لیست کارها" in text
-        or "کارها رو بفرست" in text
-        or "کارها را بفرست" in text
-        or "نمایش کارها" in text
+        if (
+        "لیست کار" in text
+        or "کارها" in text
+        or "کارا" in text
+        or "کارارو" in text
+        or "کارها رو" in text
+        or "کارها را" in text
+        or "امور" in text
+        or "عمر" in text
+        or "بفرست" in text
+        or "نمایش بده" in text
+        or "نشان بده" in text
     ):
 
         await update.message.reply_text(
