@@ -51,109 +51,51 @@ STATUS_TEXT = {
 
 async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
-    conn = sqlite3.connect("sam_pro.db")
-    cur = conn.cursor()
+    """ارسال پیگیری سه‌ساعته به گروه.
 
-    cur.execute("""
-        SELECT id, title, assigned_to, assigned_by, priority, status
-        FROM tasks
-        WHERE status NOT IN ('done', 'cancelled')
-    """)
+    قبلاً این تابع هر ۶۰ ثانیه برای تک‌تک کارهای باز پیام می‌فرستاد
+    و باعث اسپم می‌شد. الان فقط یک لیست کلی از کارهای باز می‌فرستد؛
+    روی هر کار که زده شود، منوی همان کار باز می‌شود.
+    """
 
-    tasks = cur.fetchall()
-    conn.close()
+    if not GROUP_CHAT_ID:
+        print("GROUP_CHAT_ID is not set; 3-hour task follow-up skipped.")
+        return
 
-    for task in tasks:
+    try:
+        tasks = get_open_tasks_for_panel()
+    except Exception as e:
+        print(f"3-hour task follow-up error: {e}")
+        return
 
-        task_id, title, assigned_to, assigned_by, priority, status = task
-
-        status_fa = STATUS_TEXT.get(status, "⏳ باز")
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔄 در حال پیگیری",
-                    callback_data=f"task_status:{task_id}:in_progress"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⏳ منتظر پاسخ",
-                    callback_data=f"task_status:{task_id}:waiting"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "✅ انجام شد",
-                    callback_data=f"task_status:{task_id}:done"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⛔ لغو شد",
-                    callback_data=f"task_status:{task_id}:cancelled"
-                )
-            ]
-        ])
-
+    if not tasks:
         try:
             await context.bot.send_message(
-                chat_id=assigned_to,
-                text=f"""
-⏰ یادآوری کار انجام‌نشده
-
-🆔 شناسه کار: {task_id}
-
-📌 عنوان:
-{title}
-
-🔥 اولویت:
-{priority}
-
-📍 وضعیت فعلی:
-{status_fa}
-
-لطفاً وضعیت کار را مشخص کن:
-""",
-                reply_markup=keyboard
+                chat_id=GROUP_CHAT_ID,
+                text="✅ پیگیری سه‌ساعته\n\nفعلاً کار بازی در لیست وجود ندارد."
             )
-
         except Exception as e:
-            print(f"Reminder send error for task {task_id}: {e}")
-            
-        if GROUP_CHAT_ID:
+            print(f"3-hour empty follow-up send error: {e}")
+        return
 
-            group_text = f"""
-⏰ یادآوری گروهی کار
+    text = f"""
+⏱ پیگیری سه‌ساعته کارها
 
-👤 مسئول:
-<a href="tg://user?id={assigned_to}">مسئول کار</a>
+📋 تعداد کارهای باز: {len(tasks)}
 
-🆔 شناسه کار:
-{task_id}
+روی هر کار بزن تا منوی همان کار باز شود و بتوانی وضعیت را تغییر بدهی.
+""".strip()
 
-📌 عنوان:
-{title}
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=text,
+            reply_markup=task_list_keyboard()
+        )
+    except Exception as e:
+        print(f"3-hour task list send error: {e}")
 
-🔥 اولویت:
-{priority}
 
-📍 وضعیت فعلی:
-{status_fa}
-
-لطفاً وضعیت این کار مشخص شود.
-"""
-
-            try:
-                await context.bot.send_message(
-                    chat_id=GROUP_CHAT_ID,
-                    text=group_text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-            except Exception as e:
-                print(f"Group reminder error for task {task_id}: {e}")
-                
 async def task_status_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -3885,8 +3827,9 @@ if __name__ == "__main__":
 
     job_queue.run_repeating(
         check_tasks,
-        interval=60,
-        first=10
+        interval=3 * 60 * 60,
+        first=3 * 60 * 60,
+        name="three_hour_task_followup"
     )
 
     app.job_queue.run_daily(
