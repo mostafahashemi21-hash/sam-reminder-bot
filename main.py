@@ -741,8 +741,32 @@ async def buttons(
         )
 
         return
+        
+    elif text == "⏱ یک ساعت اخیر":
 
-        elif text == "🤖 دستیار هوشمند":
+        await summary_command(update, context, "1h")
+        return
+
+    elif text == "⏱ دو ساعت اخیر":
+
+        await summary_command(update, context, "2h")
+        return
+
+    elif text == "📅 دیروز":
+
+        await summary_command(update, context, "yesterday")
+        return
+
+    elif text == "📊 ۷ روز اخیر":
+
+        await summary_command(update, context, "7d")
+        return
+
+    elif text == "⬅️ بازگشت":
+
+        await start(update, context)
+        return
+     elif text == "🤖 دستیار هوشمند":
 
         USER_STATE[
             update.effective_user.id
