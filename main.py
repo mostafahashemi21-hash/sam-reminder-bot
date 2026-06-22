@@ -1919,7 +1919,7 @@ async def task_draft_callback(
         )
 
         return
-           if data == "draft:project_menu":
+    if data == "draft:project_menu":
 
         keyboard = []
 
