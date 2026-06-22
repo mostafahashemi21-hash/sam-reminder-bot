@@ -3285,6 +3285,13 @@ app.add_handler(
 
 app.add_handler(
     CommandHandler(
+        "chatid",
+        chatid_command
+    )
+)
+
+app.add_handler(
+    CommandHandler(
         "join",
         join_command
     )
