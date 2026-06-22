@@ -118,6 +118,7 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             print(f"Reminder send error for task {task_id}: {e}")
+            
         if GROUP_CHAT_ID:
 
             group_text = f"""
