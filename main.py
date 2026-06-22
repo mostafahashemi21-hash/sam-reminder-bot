@@ -807,12 +807,32 @@ async def buttons(
         await whoami(update, context)
         return
 
-        elif text == "➕ کار جدید":
+    elif text == "➕ کار جدید":
 
         await open_task_panel(update, context)
         return
 
     elif text == "🎙 فرمان صوتی":
+
+        context.user_data["waiting_voice_task"] = True
+
+        await update.message.reply_text(
+            """
+🎙 فرمان صوتی فعال شد
+
+حالا یک ویس بفرست.
+
+می‌توانی بگویی:
+- یک کار جدید بساز
+- وضعیت کار شماره ۱۲ را انجام‌شده کن
+- برای کار شماره ۸ توضیح اضافه کن
+- یادآوری کار شماره ۵ را تغییر بده
+"""
+        )
+
+        return
+
+    elif text == "🎙 کار با ویس":
 
         context.user_data["waiting_voice_task"] = True
 
