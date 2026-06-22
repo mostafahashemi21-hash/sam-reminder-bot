@@ -57,7 +57,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip()
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "").strip()
-DELETE_USER_MENU_MESSAGES = os.getenv("DELETE_USER_MENU_MESSAGES", "false").lower() in {"1", "true", "yes", "on"}
+DELETE_USER_MENU_MESSAGES = os.getenv("DELETE_USER_MENU_MESSAGES", "true").lower() in {"1", "true", "yes", "on"}
 SMART_AUTO_APPLY = os.getenv("SMART_AUTO_APPLY", "false").lower() in {"1", "true", "yes", "on"}
 FOLLOWUP_INTERVAL_HOURS = int(os.getenv("FOLLOWUP_INTERVAL_HOURS", "3") or "3")
 APP_TZ_NAME = os.getenv("APP_TZ", "Europe/Warsaw")
@@ -90,10 +90,12 @@ def clean_text(text: Optional[str]) -> str:
 
 
 def text_key(text: Optional[str]) -> str:
+    """Normalize Persian button text. Telegram may send emojis before/after words and may use ZWNJ."""
     t = clean_text(text)
-    t = re.sub(r"[➕📋🧠🎙🤖📊👥👤❓🔙⬅️🗓📅📆📝✅❌⏰🔥📁✏️👤📍📌🗑☑️📎🔄⏳⛔🧾➖⭐️⭐]", "", t)
-    t = t.replace("/", "").replace("‌", "")
-    return re.sub(r"\s+", " ", t).strip().lower()
+    t = re.sub(r"[➕📋🧠🎙🤖📊👥👤❓🔙⬅️🗓📅📆📝✅❌⏰🔥📁✏️📍📌🗑☑️📎🔄⏳⛔🧾➖⭐️]", " ", t)
+    t = t.replace("/", " ").replace("‌", " ").replace("-", " ").replace("_", " ")
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
 
 
 def now_local() -> datetime:
@@ -218,38 +220,50 @@ def is_back(text: str) -> bool:
 
 def is_main_menu_intent(text: str) -> Optional[str]:
     k = text_key(text)
+    compact = k.replace(" ", "")
+
+    # exact and compact aliases
     mapping = {
-        "کار جدید": "new_task",
-        "ایجاد کار": "new_task",
-        "newtask": "new_task",
-        "new": "new_task",
-        "کارها": "tasks",
-        "لیست کارها": "tasks",
-        "tasks": "tasks",
-        "مدیر هوشمند": "smart",
-        "smart": "smart",
-        "تحلیل چت": "summary",
-        "summary": "summary",
-        "فرمان صوتی": "voice_help",
-        "voice": "voice_help",
-        "چت جی پی تی": "gpt_chat",
-        "چت جیپی تی": "gpt_chat",
-        "دستیار هوشمند": "gpt_chat",
-        "گزارش ها": "reports",
-        "گزارش": "reports",
-        "اعضا": "members",
-        "پروفایل": "profile",
-        "راهنما": "help",
-        "ملاقات ها": "meetings",
-        "ملاقات": "meetings",
-        "جلسات": "meetings",
-        "بازگشت": "home",
-        "برگشت": "home",
-        "start": "home",
-        "exit": "exit",
+        "کار جدید": "new_task", "ایجاد کار": "new_task", "newtask": "new_task", "new": "new_task",
+        "کارها": "tasks", "لیست کارها": "tasks", "tasks": "tasks",
+        "مدیر هوشمند": "smart", "ایجنت": "smart", "عامل هوشمند": "smart", "smart": "smart", "agent": "smart",
+        "تحلیل چت": "summary", "summary": "summary",
+        "فرمان صوتی": "voice_help", "voice": "voice_help",
+        "چت جی پی تی": "gpt_chat", "چت جیپی تی": "gpt_chat", "چت جی پیتی": "gpt_chat",
+        "دستیار هوشمند": "gpt_chat", "gpt": "gpt_chat",
+        "گزارش ها": "reports", "گزارش": "reports", "reports": "reports",
+        "اعضا": "members", "پروفایل": "profile", "راهنما": "help",
+        "ملاقات ها": "meetings", "ملاقات": "meetings", "جلسات": "meetings", "جلسه": "meetings",
+        "بازگشت": "home", "برگشت": "home", "start": "home", "exit": "exit",
     }
     if k in mapping:
         return mapping[k]
+    compact_mapping = {
+        "کارجدید": "new_task", "ایجادکار": "new_task",
+        "لیستکارها": "tasks",
+        "مدیرهوشمند": "smart",
+        "تحلیلچت": "summary",
+        "فرمانصوتی": "voice_help",
+        "چتجیپیتی": "gpt_chat", "چتجیپی تی".replace(" ", ""): "gpt_chat", "دستیارهوشمند": "gpt_chat",
+        "گزارشها": "reports", "گزارشات": "reports",
+        "ملاقاتها": "meetings", "جلسات": "meetings",
+    }
+    if compact in compact_mapping:
+        return compact_mapping[compact]
+
+    # fuzzy fallback for common bottom-keyboard labels
+    if "کار" in k and ("جدید" in k or "ایجاد" in k): return "new_task"
+    if "کارها" in k or "لیست کار" in k: return "tasks"
+    if ("مدیر" in k and "هوشمند" in k) or "ایجنت" in k or "agent" in k: return "smart"
+    if "تحلیل" in k and "چت" in k: return "summary"
+    if "فرمان" in k and "صوت" in k: return "voice_help"
+    if ("چت" in k and ("جی" in k or "gpt" in k)) or "دستیار" in k: return "gpt_chat"
+    if "گزارش" in k: return "reports"
+    if "ملاقات" in k or "جلسه" in k: return "meetings"
+    if "اعضا" in k: return "members"
+    if "پروفایل" in k: return "profile"
+    if "راهنما" in k or "help" in k: return "help"
+    if "بازگشت" in k or "برگشت" in k: return "home"
     return None
 
 
@@ -408,6 +422,7 @@ def confirm_actions_keyboard() -> InlineKeyboardMarkup:
 
 # ----------------------- cards -----------------------
 def draft_task_text(d: Dict[str, Any]) -> str:
+    hint = d.get("_hint") or "گزینه موردنظر را انتخاب کن. فقط برای عنوان یا زمان دلخواه لازم است متن بنویسی."
     return (
         "🆕 <b>ایجاد کار جدید</b>\n\n"
         f"عنوان: <b>{html(d.get('title') or 'تعیین نشده')}</b>\n"
@@ -415,7 +430,7 @@ def draft_task_text(d: Dict[str, Any]) -> str:
         f"مسئول: {html(d.get('assigned_to_name') or 'بدون مسئول')}\n"
         f"یادآوری: {html(reminder_label(d.get('reminder_at')))}\n"
         f"اولویت: {html(d.get('priority') or 'متوسط')}\n\n"
-        "گزینه موردنظر را انتخاب کن. فقط برای عنوان یا زمان دلخواه لازم است متن بنویسی."
+        f"<i>{html(hint)}</i>"
     )
 
 
@@ -436,6 +451,7 @@ def task_text(t: Dict[str, Any]) -> str:
 def draft_meeting_text(d: Dict[str, Any]) -> str:
     participants = d.get("participants") or []
     pname = "، ".join([p.get("name", "-") for p in participants]) if participants else "تعیین نشده"
+    hint = d.get("_hint") or "گزینه موردنظر را انتخاب کن. فقط برای عنوان، زمان یا مکان لازم است متن بنویسی."
     return (
         "🗓 <b>ملاقات جدید</b>\n\n"
         f"عنوان: <b>{html(d.get('title') or 'تعیین نشده')}</b>\n"
@@ -443,7 +459,8 @@ def draft_meeting_text(d: Dict[str, Any]) -> str:
         f"زمان: {html(iso_to_local_text(d.get('start_at')) if d.get('start_at') else 'تعیین نشده')}\n"
         f"مکان/لینک: {html(d.get('location') or 'تعیین نشده')}\n"
         f"شرکت‌کنندگان: {html(pname)}\n"
-        f"یادآوری: {html(reminder_label(d.get('reminder_at')))}"
+        f"یادآوری: {html(reminder_label(d.get('reminder_at')))}\n\n"
+        f"<i>{html(hint)}</i>"
     )
 
 
@@ -504,6 +521,43 @@ async def edit_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             return await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
     return await safe_reply(update, text, reply_markup, parse_mode)
 
+
+async def edit_card_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup: Any, card_key: str, parse_mode: Optional[str] = ParseMode.HTML):
+    """Edit an existing draft card instead of sending new messages while the user types title/time."""
+    q = update.callback_query
+    if q and q.message:
+        try:
+            await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            context.user_data[f"{card_key}_chat_id"] = q.message.chat_id
+            context.user_data[f"{card_key}_message_id"] = q.message.message_id
+            return q.message
+        except Exception:
+            msg = await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            context.user_data[f"{card_key}_chat_id"] = msg.chat_id
+            context.user_data[f"{card_key}_message_id"] = msg.message_id
+            return msg
+    cid = context.user_data.get(f"{card_key}_chat_id") or chat_id_of(update)
+    mid = context.user_data.get(f"{card_key}_message_id")
+    if cid and mid:
+        try:
+            await context.bot.edit_message_text(chat_id=cid, message_id=mid, text=text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+            return None
+        except Exception:
+            pass
+    msg = await safe_reply(update, text, reply_markup, parse_mode)
+    if msg:
+        context.user_data[f"{card_key}_chat_id"] = msg.chat_id
+        context.user_data[f"{card_key}_message_id"] = msg.message_id
+    return msg
+
+async def delete_user_message_if_possible(update: Update) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = "منوی اصلی آماده است.") -> None:
     context.user_data.pop("state", None)
@@ -577,7 +631,7 @@ async def start_task_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "priority": "متوسط",
         "reminder_at": None,
     }
-    msg = await edit_or_send(update, context, draft_task_text(context.user_data["draft_task"]), task_draft_keyboard())
+    msg = await edit_card_or_send(update, context, draft_task_text(context.user_data["draft_task"]), task_draft_keyboard(), "draft_task_card")
     if msg and update.effective_chat:
         # no entity id yet, but useful for reply attachments after save only
         pass
@@ -585,7 +639,7 @@ async def start_task_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def refresh_task_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     d = context.user_data.get("draft_task") or {}
-    await edit_or_send(update, context, draft_task_text(d), task_draft_keyboard())
+    await edit_card_or_send(update, context, draft_task_text(d), task_draft_keyboard(), "draft_task_card")
 
 
 async def save_task_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -653,12 +707,12 @@ async def start_meeting_draft(update: Update, context: ContextTypes.DEFAULT_TYPE
         "created_by_name": name,
         "reminder_at": None,
     }
-    await edit_or_send(update, context, draft_meeting_text(context.user_data["draft_meeting"]), meeting_draft_keyboard())
+    await edit_card_or_send(update, context, draft_meeting_text(context.user_data["draft_meeting"]), meeting_draft_keyboard(), "draft_meeting_card")
 
 
 async def refresh_meeting_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     d = context.user_data.get("draft_meeting") or {}
-    await edit_or_send(update, context, draft_meeting_text(d), meeting_draft_keyboard())
+    await edit_card_or_send(update, context, draft_meeting_text(d), meeting_draft_keyboard(), "draft_meeting_card")
 
 
 async def save_meeting_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -845,8 +899,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await refresh_task_draft(update, context)
             return
         if action == "title":
+            d["_hint"] = "✏️ عنوان کار را بفرست. بعد از ذخیره، پیام عنوان از چت حذف می‌شود."
             context.user_data["state"] = "await_task_title"
-            await edit_or_send(update, context, "✏️ عنوان کار را بنویس:", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="draft_task:back")]]))
+            await refresh_task_draft(update, context)
             return
         if action == "project":
             await edit_or_send(update, context, "📁 پروژه را انتخاب کن:", project_keyboard("draft_task"))
@@ -954,6 +1009,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "meeting:minutes_help":
         await edit_or_send(update, context, "برای ثبت صورتجلسه بنویس:\n<code>ملاقات 3: متن صورتجلسه</code>", meetings_menu_keyboard()); return
 
+    # meeting draft value callbacks must be before generic draft_meeting menu
+    if data.startswith("draft_meeting:project:"):
+        context.user_data.setdefault("draft_meeting", {})["project"] = data.split(":", 2)[2]
+        context.user_data.setdefault("draft_meeting", {}).pop("_hint", None)
+        await refresh_meeting_draft(update, context); return
+    if data.startswith("draft_meeting:rem:"):
+        await handle_draft_reminder(update, context, "draft_meeting", data.split(":", 2)[2]); return
+    if data.startswith("draft_meeting:participants:"):
+        await handle_participant_callback(update, context, data); return
+
     if data.startswith("draft_meeting:"):
         parts = data.split(":")
         action = parts[1]
@@ -962,11 +1027,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if action == "back":
             await refresh_meeting_draft(update, context); return
         if action == "title":
-            context.user_data["state"] = "await_meeting_title"; await edit_or_send(update, context, "✏️ عنوان ملاقات را بنویس:", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="draft_meeting:back")]])); return
+            d = context.user_data.setdefault("draft_meeting", {})
+            d["_hint"] = "✏️ عنوان ملاقات را بفرست. بعد از ذخیره، پیام عنوان از چت حذف می‌شود."
+            context.user_data["state"] = "await_meeting_title"
+            await refresh_meeting_draft(update, context); return
         if action == "time":
-            context.user_data["state"] = "await_meeting_time"; await edit_or_send(update, context, "🕒 زمان ملاقات را بنویس. مثال: فردا 10:00", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="draft_meeting:back")]])); return
+            d = context.user_data.setdefault("draft_meeting", {})
+            d["_hint"] = "🕒 زمان ملاقات را بفرست. مثال: فردا 10:00 یا 2026-06-25 18:00"
+            context.user_data["state"] = "await_meeting_time"
+            await refresh_meeting_draft(update, context); return
         if action == "location":
-            context.user_data["state"] = "await_meeting_location"; await edit_or_send(update, context, "📍 مکان یا لینک جلسه را بنویس:", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="draft_meeting:back")]])); return
+            d = context.user_data.setdefault("draft_meeting", {})
+            d["_hint"] = "📍 مکان یا لینک ملاقات را بفرست. بعد از ذخیره، پیام حذف می‌شود."
+            context.user_data["state"] = "await_meeting_location"
+            await refresh_meeting_draft(update, context); return
         if action == "project":
             await edit_or_send(update, context, "📁 پروژه را انتخاب کن:", project_keyboard("draft_meeting")); return
         if action == "participants":
@@ -975,14 +1049,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await edit_or_send(update, context, "⏰ یادآوری را انتخاب کن:", reminder_keyboard("draft_meeting")); return
         if action == "save":
             await save_meeting_draft(update, context); return
-    if data.startswith("draft_meeting:project:"):
-        context.user_data.setdefault("draft_meeting", {})["project"] = data.split(":", 2)[2]
-        await refresh_meeting_draft(update, context); return
-    if data.startswith("draft_meeting:participants:"):
-        await handle_participant_callback(update, context, data); return
-    if data.startswith("draft_meeting:rem:"):
-        await handle_draft_reminder(update, context, "draft_meeting", data.split(":", 2)[2]); return
-
     # summary
     if data.startswith("summary:"):
         await run_summary_range(update, context, data.split(":", 1)[1]); return
@@ -1252,21 +1318,26 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     if state == "await_task_title":
-        context.user_data.setdefault("draft_task", {})["title"] = text
+        await delete_user_message_if_possible(update)
+        d = context.user_data.setdefault("draft_task", {})
+        d["title"] = text
+        d.pop("_hint", None)
         context.user_data.pop("state", None)
-        await safe_reply(update, "✅ ذخیره شد")
         await refresh_task_draft(update, context)
         return
     if state == "await_task_custom_reminder":
+        await delete_user_message_if_possible(update)
         dt = parse_datetime_text(text)
         if dt is None and "بدون" not in text:
             context.user_data.pop("state", None)
-            await safe_reply(update, "❌ فرمت زمان اشتباه است. مثال: 2026-06-25 18:00")
+            d = context.user_data.setdefault("draft_task", {})
+            d["_hint"] = "❌ فرمت زمان اشتباه است. دوباره از دکمه یادآوری، زمان دلخواه را انتخاب کن."
             await refresh_task_draft(update, context)
             return
-        context.user_data.setdefault("draft_task", {})["reminder_at"] = dt
+        d = context.user_data.setdefault("draft_task", {})
+        d["reminder_at"] = dt
+        d.pop("_hint", None)
         context.user_data.pop("state", None)
-        await safe_reply(update, "✅ ذخیره شد")
         await refresh_task_draft(update, context)
         return
     if state == "await_existing_task_reminder":
@@ -1299,25 +1370,32 @@ async def handle_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     # meeting states
     if state == "await_meeting_title":
-        context.user_data.setdefault("draft_meeting", {})["title"] = text
+        await delete_user_message_if_possible(update)
+        d = context.user_data.setdefault("draft_meeting", {})
+        d["title"] = text
+        d.pop("_hint", None)
         context.user_data.pop("state", None)
-        await safe_reply(update, "✅ ذخیره شد")
         await refresh_meeting_draft(update, context)
         return
     if state == "await_meeting_time":
+        await delete_user_message_if_possible(update)
         dt = parse_datetime_text(text)
         context.user_data.pop("state", None)
+        d = context.user_data.setdefault("draft_meeting", {})
         if dt is None:
-            await safe_reply(update, "❌ فرمت زمان اشتباه است. مثال: فردا 10:00")
-        else:
-            context.user_data.setdefault("draft_meeting", {})["start_at"] = dt
-            await safe_reply(update, "✅ ذخیره شد")
+            d["_hint"] = "❌ فرمت زمان اشتباه است. دوباره دکمه زمان را بزن. مثال: فردا 10:00"
+            await refresh_meeting_draft(update, context)
+            return
+        d["start_at"] = dt
+        d.pop("_hint", None)
         await refresh_meeting_draft(update, context)
         return
     if state == "await_meeting_location":
-        context.user_data.setdefault("draft_meeting", {})["location"] = text
+        await delete_user_message_if_possible(update)
+        d = context.user_data.setdefault("draft_meeting", {})
+        d["location"] = text
+        d.pop("_hint", None)
         context.user_data.pop("state", None)
-        await safe_reply(update, "✅ ذخیره شد")
         await refresh_meeting_draft(update, context)
         return
     if state == "await_meeting_custom_reminder":
@@ -1524,7 +1602,11 @@ async def ask_openai(prompt: str, system: str = "", temperature: float = 0.2) ->
             temperature=temperature,
         )
         return resp.choices[0].message.content or ""
-    return await asyncio.to_thread(_call)
+    try:
+        return await asyncio.to_thread(_call)
+    except Exception as e:
+        logger.exception("OpenAI request failed")
+        return f"❌ خطای OpenAI: {str(e)[:180]}"
 
 
 async def run_gpt_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -1871,10 +1953,13 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("newtask", newtask_cmd))
     app.add_handler(CommandHandler("new", newtask_cmd))
     app.add_handler(CommandHandler("meetings", meetings_cmd))
+    app.add_handler(CommandHandler("meeting", meetings_cmd))
     app.add_handler(CommandHandler("summary", summary_cmd))
     app.add_handler(CommandHandler("smart", smart_cmd))
+    app.add_handler(CommandHandler("agent", smart_cmd))
     app.add_handler(CommandHandler("gpt", gpt_cmd))
     app.add_handler(CommandHandler("reports", reports_cmd))
+    app.add_handler(CommandHandler("report", reports_cmd))
     app.add_handler(CommandHandler("stats", show_stats))
     app.add_handler(CommandHandler("export_excel", export_excel_cmd))
     app.add_handler(CommandHandler("export_pdf", export_pdf_cmd))
