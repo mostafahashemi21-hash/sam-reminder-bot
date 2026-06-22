@@ -2782,6 +2782,206 @@ async def send_daily_report_job(
 
             print(f"Daily report send error for {admin_id}: {e}")
 
+
+def clean_json_text(text):
+
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = text.replace("```json", "")
+        text = text.replace("```", "")
+        text = text.strip()
+
+    return text
+
+
+def match_option(value, options, default_value):
+
+    if not value:
+        return default_value
+
+    for option in options:
+        if value in option or option in value:
+            return option
+
+    return default_value
+
+
+async def voice_task_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not context.user_data.get("waiting_voice_task"):
+        return
+
+    await register_user(update)
+
+    user = get_user(update.effective_user.id)
+
+    if not user or user[3] != "admin":
+        await update.message.reply_text(
+            "فقط مدیر می‌تواند با ویس کار ایجاد کند."
+        )
+        context.user_data.pop("waiting_voice_task", None)
+        return
+
+    if not update.message.voice:
+        return
+
+    await update.message.reply_text(
+        "🎙 ویس دریافت شد. در حال تبدیل به متن..."
+    )
+
+    voice = update.message.voice
+
+    file = await context.bot.get_file(voice.file_id)
+
+    file_path = f"/tmp/voice_task_{update.effective_user.id}.ogg"
+
+    await file.download_to_drive(file_path)
+
+    try:
+
+        with open(file_path, "rb") as audio_file:
+            transcript_response = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=audio_file
+            )
+
+        transcript = transcript_response.text
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ خطا در تبدیل ویس به متن:\n{e}"
+        )
+        context.user_data.pop("waiting_voice_task", None)
+        return
+
+    await update.message.reply_text(
+        f"""
+📝 متن ویس:
+
+{transcript}
+
+در حال ساخت پیش‌نویس کار...
+"""
+    )
+
+    prompt = f"""
+از متن زیر اطلاعات یک کار مدیریتی را استخراج کن.
+
+فقط JSON بده. هیچ توضیح اضافه نده.
+
+فرمت خروجی:
+{{
+  "title": "عنوان کار",
+  "member_name": "نام مسئول اگر گفته شده",
+  "priority": "🔴 زیاد یا 🟡 متوسط یا 🟢 کم",
+  "project": "یکی از این‌ها: {PROJECT_OPTIONS}",
+  "tag": "یکی از این‌ها: {TAG_OPTIONS}",
+  "reminder_time": "none",
+  "reminder_text": "بدون یادآوری"
+}}
+
+قوانین:
+- اگر اولویت بالا/فوری/مهم بود، priority را "🔴 زیاد" بگذار.
+- اگر اولویت مشخص نبود، "🟡 متوسط" بگذار.
+- اگر پروژه مشخص نبود، "🧩 عمومی" بگذار.
+- اگر دسته‌بندی مشخص نبود، "🔍 پیگیری" بگذار.
+- اگر زمان یادآوری دقیق گفته نشده، reminder_time را "none" بگذار.
+- اگر یادآوری گفته نشده، reminder_text را "بدون یادآوری" بگذار.
+
+متن ویس:
+{transcript}
+"""
+
+    try:
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "تو دستیار مدیریت کار هستی و فقط JSON معتبر برمی‌گردانی."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+
+        raw_answer = response.choices[0].message.content
+
+        data = json.loads(
+            clean_json_text(raw_answer)
+        )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ خطا در استخراج اطلاعات کار:\n{e}"
+        )
+        context.user_data.pop("waiting_voice_task", None)
+        return
+
+    draft = get_task_draft(update.effective_user.id)
+
+    draft["title"] = data.get("title", transcript)
+
+    member_name = data.get("member_name", "")
+
+    assigned_to = None
+
+    if member_name:
+        assigned_to = get_member_id_by_name(member_name)
+
+    if assigned_to:
+        draft["assigned_to"] = assigned_to
+        draft["member_name"] = member_name
+    else:
+        draft["assigned_to"] = None
+        draft["member_name"] = ""
+
+    draft["priority"] = data.get(
+        "priority",
+        "🟡 متوسط"
+    )
+
+    draft["project"] = match_option(
+        data.get("project", ""),
+        PROJECT_OPTIONS,
+        "🧩 عمومی"
+    )
+
+    draft["tag"] = match_option(
+        data.get("tag", ""),
+        TAG_OPTIONS,
+        "🔍 پیگیری"
+    )
+
+    draft["reminder_time"] = data.get(
+        "reminder_time",
+        "none"
+    )
+
+    draft["reminder_text"] = data.get(
+        "reminder_text",
+        "بدون یادآوری"
+    )
+
+    msg = await update.message.reply_text(
+        task_panel_text(draft),
+        reply_markup=task_panel_keyboard()
+    )
+
+    draft["panel_chat_id"] = msg.chat_id
+    draft["panel_message_id"] = msg.message_id
+
+    context.user_data.pop("waiting_voice_task", None)
+
 init_db()
 init_silent_ai_tables()
 init_task_metadata_columns()
