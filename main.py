@@ -1538,6 +1538,13 @@ app.add_handler(
         exit_ai
     )
 )
+
+app.add_handler(
+    CallbackQueryHandler(
+        suggestion_callback,
+        pattern="^suggestion:"
+    )
+)
 app.add_handler(
     CallbackQueryHandler(
         task_status_callback,
@@ -1593,6 +1600,14 @@ app.add_handler(
         ai_chat
     ),
     group=1
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        silent_message_watcher
+    ),
+    group=2
 )
 
 if __name__ == "__main__":
