@@ -807,12 +807,12 @@ async def buttons(
         await whoami(update, context)
         return
 
-    elif text == "➕ کار جدید":
+        elif text == "➕ کار جدید":
 
         await open_task_panel(update, context)
         return
 
-        elif text == "🎙 فرمان صوتی":
+    elif "فرمان صوتی" in text:
 
         context.user_data["waiting_voice_task"] = True
 
@@ -840,34 +840,6 @@ async def buttons(
 
         return
 
-    elif text == "🎙 کار با ویس":
-
-        context.user_data["waiting_voice_task"] = True
-
-        await update.message.reply_text(
-            """
-🎙 فرمان صوتی فعال شد
-
-حالا یک ویس بفرست.
-
-فرمان‌هایی که می‌فهمم:
-
-📋 لیست کارها را بفرست
-📅 کارهای امروز را بگو
-📆 کارهای فردا را بگو
-⏳ کارهای مانده را بگو
-🗑 کار شماره ۱۲ را پاک کن
-
-همچنین:
-➕ یک کار جدید بساز
-✅ وضعیت کار شماره ۱۲ را انجام‌شده کن
-📝 برای کار شماره ۸ توضیح اضافه کن
-⏰ یادآوری کار شماره ۵ را تغییر بده
-"""
-        )
-
-
-        return
 task_conversation = ConversationHandler(
 
     entry_points=[
