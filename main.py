@@ -3205,6 +3205,14 @@ app.add_handler(
 
 app.add_handler(
     MessageHandler(
+        filters.VOICE,
+        voice_task_handler
+    ),
+    group=0
+)
+
+app.add_handler(
+    MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         task_draft_text_input
     ),
