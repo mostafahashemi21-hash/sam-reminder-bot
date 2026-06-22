@@ -1695,9 +1695,7 @@ def task_panel_text(draft):
 ⏰ یادآوری:
 {draft["reminder_text"]}
 """
-⏰ یادآوری:
-{draft["reminder_text"]}
-"""
+
 
 
 def task_panel_keyboard():
