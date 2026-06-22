@@ -2858,36 +2858,24 @@ async def voice_task_handler(
     file_path = f"/tmp/voice_task_{update.effective_user.id}.ogg"
 
     await file.download_to_drive(file_path)
-
-   try:
-
-        with open(file_path, "rb") as audio_file:
-
-            transcript_response = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=audio_file
-            )
-
-        transcript = transcript_response.text
-
-        handled = await handle_voice_command(
-            update,
-            context,
-            transcript
+    with open(file_path, "rb") as audio_file:
+        transcript_response = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=audio_file
         )
 
-        if handled:
-            context.user_data.pop("waiting_voice_task", None)
-            return
+    transcript = transcript_response.text
 
-    except Exception as e:
+    handled = await handle_voice_command(
+        update,
+        context,
+        transcript
+    )
 
-        await update.message.reply_text(
-            f"❌ خطا در تبدیل ویس به متن:\n{e}"
-        )
-
+    if handled:
         context.user_data.pop("waiting_voice_task", None)
         return
+   
     await update.message.reply_text(
         f"""
 📝 متن ویس:
