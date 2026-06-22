@@ -2177,7 +2177,13 @@ async def task_draft_callback(
 🔥 اولویت:
 {draft["priority"]}
 
-⏰ یادآوری:
+🏗 پروژه:
+{draft["project"]}
+
+🏷 دسته‌بندی:
+{draft["tag"]}
+
+⏰ یادآوری
 {draft["reminder_text"]}
 """
         )
@@ -2191,10 +2197,16 @@ async def task_draft_callback(
 📝 عنوان:
 {draft["title"]}
 
-🔥 اولویت:
+🔥 اولویت
 {draft["priority"]}
 
-⏰ یادآوری:
+🏗 پروژه:
+{draft["project"]}
+
+🏷 دسته‌بندی:
+{draft["tag"]}
+
+⏰ یادآوری
 {draft["reminder_text"]}
 """
             )
