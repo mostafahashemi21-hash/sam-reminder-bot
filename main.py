@@ -1544,7 +1544,7 @@ async def summary_command(
 
     chat_id = update.effective_chat.id
 
-    query_text = " ".join(context.args)
+    query_text = forced if forced else " ".join(context.args)
 
     if not query_text:
         query_text = "1h"
