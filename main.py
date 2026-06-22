@@ -237,9 +237,40 @@ def parse_db_dt(value: Optional[str]) -> Optional[datetime]:
     return None
 
 
+def button_key(text: str) -> str:
+    """Normalize Telegram button/user text so RTL emoji order doesn't matter."""
+    text = normalize_text(fa_to_en_digits(text or "")).lower()
+    text = text.replace("/", " ")
+    # keep letters/numbers/spaces, remove emoji and punctuation
+    text = re.sub(r"[^\w\sآ-ی]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def has_phrase(text: str, *phrases: str) -> bool:
+    key = button_key(text)
+    if not key:
+        return False
+    return any(button_key(p) == key or button_key(p) in key for p in phrases)
+
+
 def is_back(text: str) -> bool:
-    text = normalize_text(text).lower()
-    return text in ["بازگشت", "🔙 بازگشت", "⬅️بازگشت", "لغو", "cancel", "/exit", "exit", "خروج"]
+    return has_phrase(text, "بازگشت", "لغو", "cancel", "exit", "خروج") or normalize_text(text).lower() in ["/exit"]
+
+
+def is_main_menu_alias(text: str) -> bool:
+    return any([
+        has_phrase(text, "کار جدید", "ایجاد کار", "ساخت کار"),
+        has_phrase(text, "کارها", "لیست کارها", "پیگیری"),
+        has_phrase(text, "مدیر هوشمند"),
+        has_phrase(text, "تحلیل چت", "خلاصه چت"),
+        has_phrase(text, "چت جی پی تی", "chatgpt", "دستیار هوشمند"),
+        has_phrase(text, "فرمان صوتی", "ویس"),
+        has_phrase(text, "گزارش ها", "گزارش‌ها"),
+        has_phrase(text, "اعضا"),
+        has_phrase(text, "پروفایل"),
+        has_phrase(text, "راهنما", "کمک"),
+    ])
 
 
 def trim(text: str, n: int = 80) -> str:
@@ -259,11 +290,11 @@ def user_id(update: Update) -> Optional[int]:
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            ["➕ کار جدید", "📋 کارها"],
-            ["🧠 مدیر هوشمند", "🧠 تحلیل چت"],
-            ["🤖 چت جی پی تی", "🎙 فرمان صوتی"],
-            ["📊 گزارش‌ها", "👥 اعضا"],
-            ["👤 پروفایل", "❓ راهنما"],
+            ["کار جدید ➕", "کارها 📋"],
+            ["مدیر هوشمند 🧠", "تحلیل چت 🧠"],
+            ["چت جی پی تی 🤖", "فرمان صوتی 🎙"],
+            ["گزارش‌ها 📊", "اعضا 👥"],
+            ["پروفایل 👤", "راهنما ❓"],
         ],
         resize_keyboard=True,
     )
@@ -571,6 +602,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await register_user(update)
+    clear_user_states(context, user_id(update))
     await show_task_list(update, context)
 
 
@@ -582,7 +614,7 @@ async def newtask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     clear_user_states(context, user_id(update))
     context.user_data["state"] = "waiting_new_title"
-    await update.message.reply_text("عنوان کار را بنویس:", reply_markup=back_keyboard())
+    await update.message.reply_text("۱) عنوان کار را بنویس:", reply_markup=back_keyboard())
 
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -723,7 +755,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def exit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_states(context, user_id(update))
-    await update.message.reply_text("✅ خارج شد", reply_markup=main_keyboard())
+    await update.message.reply_text("\u200b", reply_markup=main_keyboard())
 
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -777,18 +809,18 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "main:back":
         clear_user_states(context, query.from_user.id)
-        await query.message.reply_text("✅ بازگشت", reply_markup=main_keyboard())
+        await query.message.reply_text("\u200b", reply_markup=main_keyboard())
         return
 
     if data == "new:start":
         clear_user_states(context, query.from_user.id)
         context.user_data["state"] = "waiting_new_title"
-        await query.message.reply_text("عنوان کار را بنویس:", reply_markup=back_keyboard())
+        await query.message.reply_text("۱) عنوان کار را بنویس:", reply_markup=back_keyboard())
         return
 
     if data == "new:back:title":
         context.user_data["state"] = "waiting_new_title"
-        await query.message.reply_text("عنوان کار را بنویس:", reply_markup=back_keyboard())
+        await query.message.reply_text("۱) عنوان کار را بنویس:", reply_markup=back_keyboard())
         return
 
     if data == "new:back:project":
@@ -989,19 +1021,11 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if is_back(text):
         clear_user_states(context, user_id(update))
-        await update.message.reply_text("✅ بازگشت", reply_markup=main_keyboard())
+        await update.message.reply_text("\u200b", reply_markup=main_keyboard())
         return
 
     # If the user is inside a wizard but taps a main menu button, leave the wizard first.
-    main_menu_aliases = [
-        "➕ کار جدید", "کار جدید", "ایجاد کار", "ساخت کار",
-        "📋 کارها", "کارها", "لیست کارها", "پیگیری", "⏱ پیگیری",
-        "🧠 مدیر هوشمند", "مدیر هوشمند", "🧠 تحلیل چت", "تحلیل چت", "خلاصه چت",
-        "🤖 چت جی پی تی", "چت جی پی تی", "chatgpt", "دستیار هوشمند",
-        "🎙 فرمان صوتی", "فرمان صوتی", "ویس",
-        "📊 گزارش‌ها", "گزارش‌ها", "👥 اعضا", "اعضا", "👤 پروفایل", "پروفایل", "❓ راهنما", "راهنما", "کمک",
-    ]
-    if context.user_data.get("state") and text in main_menu_aliases:
+    if context.user_data.get("state") and is_main_menu_alias(text):
         clear_user_states(context, user_id(update))
 
     state = context.user_data.get("state")
@@ -1101,49 +1125,49 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
     # Keyboard buttons and Persian aliases.
-    if text in ["➕ کار جدید", "کار جدید", "ایجاد کار", "ساخت کار"]:
+    if has_phrase(text, "کار جدید", "ایجاد کار", "ساخت کار"):
         await newtask_command(update, context)
         return
-    if text in ["📋 کارها", "کارها", "لیست کارها", "پیگیری", "⏱ پیگیری"]:
+    if has_phrase(text, "کارها", "لیست کارها", "پیگیری"):
         await tasks_command(update, context)
         return
-    if text in ["🧠 مدیر هوشمند", "مدیر هوشمند"]:
+    if has_phrase(text, "مدیر هوشمند"):
         await smart_command(update, context)
         return
-    if text in ["🧠 تحلیل چت", "تحلیل چت", "خلاصه چت"]:
+    if has_phrase(text, "تحلیل چت", "خلاصه چت"):
         await summary_command(update, context)
         return
-    if text in ["🤖 چت جی پی تی", "چت جی پی تی", "chatgpt", "دستیار هوشمند"]:
+    if has_phrase(text, "چت جی پی تی", "chatgpt", "دستیار هوشمند"):
         await ai_command(update, context)
         return
-    if text in ["🎙 فرمان صوتی", "فرمان صوتی", "ویس"]:
-        await update.message.reply_text("🎙 ویس بفرست. من اول تبدیل به متن می‌کنم، بعد فقط اگر فرمان واضح باشد اجرا می‌کنم.")
+    if has_phrase(text, "فرمان صوتی", "ویس"):
+        await update.message.reply_text("🎙 ویس بفرست. من اول تبدیل به متن می‌کنم، بعد اگر فرمان واضح باشد اجرا می‌کنم.")
         return
-    if text in ["📊 گزارش‌ها", "گزارش‌ها"]:
+    if has_phrase(text, "گزارش ها", "گزارش‌ها"):
         await update.message.reply_text("📊 گزارش‌ها", reply_markup=reports_keyboard())
         return
-    if text in ["📊 آمار", "آمار"]:
+    if has_phrase(text, "آمار"):
         await stats_command(update, context)
         return
-    if text in ["📅 گزارش روزانه", "گزارش روزانه"]:
+    if has_phrase(text, "گزارش روزانه"):
         await daily_report_command(update, context)
         return
-    if text in ["📈 گزارش هفتگی", "گزارش هفتگی"]:
+    if has_phrase(text, "گزارش هفتگی"):
         await weekly_report_command(update, context)
         return
-    if text in ["📥 خروجی اکسل", "خروجی اکسل", "اکسل"]:
+    if has_phrase(text, "خروجی اکسل", "اکسل"):
         await export_excel_command(update, context)
         return
-    if text in ["📄 خروجی PDF", "خروجی PDF", "PDF", "pdf"]:
+    if has_phrase(text, "خروجی PDF", "PDF"):
         await export_pdf_command(update, context)
         return
-    if text in ["👥 اعضا", "اعضا"]:
+    if has_phrase(text, "اعضا"):
         await members(update, context)
         return
-    if text in ["👤 پروفایل", "پروفایل"]:
+    if has_phrase(text, "پروفایل"):
         await whoami(update, context)
         return
-    if text in ["❓ راهنما", "راهنما", "کمک"]:
+    if has_phrase(text, "راهنما", "کمک"):
         await help_command(update, context)
         return
 
@@ -1188,12 +1212,14 @@ async def file_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     await register_user(update)
     reply_id = update.message.reply_to_message.message_id if update.message.reply_to_message else None
-    if not reply_id:
-        await update.message.reply_text("برای ذخیره فایل، روی منوی همان کار Reply کن و فایل/عکس بفرست.")
-        return
-    task_id = get_task_id_by_message(update.effective_chat.id, reply_id)
+    task_id = None
+    if reply_id:
+        task_id = get_task_id_by_message(update.effective_chat.id, reply_id)
     if not task_id:
-        await update.message.reply_text("این پیام به کار خاصی وصل نیست.")
+        # Fallback: caption like "کار 1" or "برای کار 1"
+        task_id = extract_task_id(update.message.caption or "")
+    if not task_id:
+        await update.message.reply_text("برای ذخیره فایل، روی منوی همان کار Reply کن یا در کپشن بنویس: کار 1")
         return
     file_id = None
     file_type = None
@@ -1259,6 +1285,12 @@ async def handle_voice_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         task_id = int(fa_to_en_digits(m.group(1)))
         status = detect_status_from_text(t) or "in_progress"
         await set_status_and_reply(update, task_id, status)
+        return
+    # If there is exactly one open task, allow voice commands like "انجام شد" without task number.
+    inferred_status = detect_status_from_text(t)
+    open_tasks = get_open_tasks(5)
+    if inferred_status and len(open_tasks) == 1:
+        await set_status_and_reply(update, int(open_tasks[0]["id"]), inferred_status)
         return
     m = re.search(r"کار\s*(?:شماره\s*)?([0-9۰-۹٠-٩]+)\s*[:：-]?\s*(.+)", tnum)
     if m and any(w in t for w in ["زنگ", "جواب", "گفت", "فرستادم", "پیگیری", "انجام"]):
