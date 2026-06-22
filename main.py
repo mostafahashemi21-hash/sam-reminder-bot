@@ -717,13 +717,13 @@ async def buttons(
     await register_user(update)
 
     text = update.message.text
-    
+
     if text == "📋 کارها":
 
         await open_tasks_panel(update, context)
         return
 
-     elif text == "⏱ پیگیری":
+    elif text == "⏱ پیگیری":
 
         await open_tasks_panel(update, context)
         return
@@ -735,7 +735,7 @@ async def buttons(
             ["⏱ دو ساعت اخیر"],
             ["📅 دیروز"],
             ["📊 ۷ روز اخیر"],
-            ["⬅️ بازگشت"]
+            ["⬅️بازگشت"]
         ]
 
         await update.message.reply_text(
@@ -747,7 +747,7 @@ async def buttons(
         )
 
         return
-        
+
     elif text == "⏱ یک ساعت اخیر":
 
         await summary_command(update, context, "1h")
@@ -768,11 +768,12 @@ async def buttons(
         await summary_command(update, context, "7d")
         return
 
-    elif text == "⬅️ بازگشت":
+    elif text == "⬅️بازگشت":
 
         await start(update, context)
         return
-     elif text == "🤖 دستیار هوشمند":
+
+    elif text == "🤖 دستیار هوشمند":
 
         USER_STATE[
             update.effective_user.id
@@ -793,23 +794,22 @@ async def buttons(
     elif text == "👥 اعضا":
 
         await members(update, context)
+        return
 
     elif text == "📊 آمار":
 
         await stats(update, context)
+        return
 
     elif text == "👤 پروفایل":
 
         await whoami(update, context)
+        return
 
     elif text == "➕ کار جدید":
 
         await open_task_panel(update, context)
         return
-
-    elif text == "⏱ پیگیری":
-
-        await list_tasks(update, context)
 task_conversation = ConversationHandler(
 
     entry_points=[
