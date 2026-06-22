@@ -3000,6 +3000,265 @@ async def voice_task_handler(
 
     context.user_data.pop("waiting_voice_task", None)
 
+def fa_to_en_digits(text):
+
+    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
+    ar_digits = "٠١٢٣٤٥٦٧٨٩"
+    en_digits = "0123456789"
+
+    for i in range(10):
+        text = text.replace(fa_digits[i], en_digits[i])
+        text = text.replace(ar_digits[i], en_digits[i])
+
+    return text
+
+
+def extract_task_id_from_text(text):
+
+    text = fa_to_en_digits(text)
+
+    import re
+
+    match = re.search(r"\d+", text)
+
+    if match:
+        return int(match.group())
+
+    word_numbers = {
+        "یک": 1,
+        "دو": 2,
+        "سه": 3,
+        "چهار": 4,
+        "پنج": 5,
+        "شش": 6,
+        "هفت": 7,
+        "هشت": 8,
+        "نه": 9,
+        "ده": 10,
+        "یازده": 11,
+        "دوازده": 12,
+        "سیزده": 13,
+        "چهارده": 14,
+        "پانزده": 15,
+        "شانزده": 16,
+        "هفده": 17,
+        "هجده": 18,
+        "نوزده": 19,
+        "بیست": 20
+    }
+
+    for word, number in word_numbers.items():
+        if word in text:
+            return number
+
+    return None
+
+
+def get_voice_tasks_text(mode):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    tomorrow = (
+        datetime.now() + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+
+    if mode == "today":
+
+        cur.execute("""
+            SELECT id, title, priority, status, project, tag, reminder_time
+            FROM tasks
+            WHERE status NOT IN ('done', 'cancelled')
+            AND (
+                created_at LIKE ?
+                OR reminder_time LIKE ?
+            )
+            ORDER BY id DESC
+            LIMIT 20
+        """, (
+            today + "%",
+            today + "%"
+        ))
+
+        title = "📅 کارهای امروز"
+
+    elif mode == "tomorrow":
+
+        cur.execute("""
+            SELECT id, title, priority, status, project, tag, reminder_time
+            FROM tasks
+            WHERE status NOT IN ('done', 'cancelled')
+            AND reminder_time LIKE ?
+            ORDER BY id DESC
+            LIMIT 20
+        """, (
+            tomorrow + "%",
+        ))
+
+        title = "📅 کارهای فردا"
+
+    else:
+
+        cur.execute("""
+            SELECT id, title, priority, status, project, tag, reminder_time
+            FROM tasks
+            WHERE status NOT IN ('done', 'cancelled')
+            ORDER BY id DESC
+            LIMIT 20
+        """)
+
+        title = "📋 کارهای مانده / باز"
+
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return f"{title}\n\nکاری پیدا نشد."
+
+    text = f"{title}\n\n"
+
+    for row in rows:
+
+        task_id, task_title, priority, status, project, tag, reminder_time = row
+
+        status_fa = STATUS_TEXT.get(status, status)
+
+        reminder = (
+            "بدون یادآوری"
+            if reminder_time == "none"
+            else reminder_time
+        )
+
+        text += f"""
+🆔 #{task_id}
+📝 {task_title}
+🔥 {priority}
+📍 {status_fa}
+🏗 {project}
+🏷 {tag}
+⏰ {reminder}
+
+"""
+
+    return text
+
+
+def cancel_task_by_voice(task_id):
+
+    conn = sqlite3.connect("sam_pro.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT title
+        FROM tasks
+        WHERE id=?
+    """, (task_id,))
+
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        return None
+
+    title = row[0]
+
+    cur.execute("""
+        UPDATE tasks
+        SET status='cancelled'
+        WHERE id=?
+    """, (task_id,))
+
+    conn.commit()
+    conn.close()
+
+    return title
+
+
+async def handle_voice_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    transcript
+):
+
+    text = transcript.strip()
+
+    if "پاک کن" in text or "حذف کن" in text:
+
+        task_id = extract_task_id_from_text(text)
+
+        if not task_id:
+            await update.message.reply_text(
+                "❌ شماره کار را متوجه نشدم. مثلا بگو: کار شماره ۱۲ را پاک کن."
+            )
+            return True
+
+        title = cancel_task_by_voice(task_id)
+
+        if not title:
+            await update.message.reply_text(
+                f"❌ کار شماره {task_id} پیدا نشد."
+            )
+            return True
+
+        await update.message.reply_text(
+            f"""
+🗑 کار از لیست حذف شد
+
+🆔 شماره:
+{task_id}
+
+📝 عنوان:
+{title}
+"""
+        )
+
+        return True
+
+    if "امروز" in text:
+
+        await update.message.reply_text(
+            get_voice_tasks_text("today")
+        )
+
+        return True
+
+    if "فردا" in text:
+
+        await update.message.reply_text(
+            get_voice_tasks_text("tomorrow")
+        )
+
+        return True
+
+    if (
+        "مانده" in text
+        or "باقی" in text
+        or "باز" in text
+        or "انجام نشده" in text
+    ):
+
+        await update.message.reply_text(
+            get_voice_tasks_text("remaining")
+        )
+
+        return True
+
+    if (
+        "لیست کارها" in text
+        or "کارها رو بفرست" in text
+        or "کارها را بفرست" in text
+        or "نمایش کارها" in text
+    ):
+
+        await update.message.reply_text(
+            get_voice_tasks_text("remaining")
+        )
+
+        return True
+
+    return False
+
 init_db()
 init_silent_ai_tables()
 init_task_metadata_columns()
