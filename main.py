@@ -1686,6 +1686,15 @@ def task_panel_text(draft):
 🔥 اولویت:
 {draft["priority"]}
 
+🏗 پروژه:
+{draft["project"]}
+
+🏷 دسته‌بندی:
+{draft["tag"]}
+
+⏰ یادآوری:
+{draft["reminder_text"]}
+"""
 ⏰ یادآوری:
 {draft["reminder_text"]}
 """
@@ -1714,6 +1723,18 @@ def task_panel_keyboard():
         ],
         [
             InlineKeyboardButton(
+                "🏗 پروژه",
+                callback_data="draft:project_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏷 دسته‌بندی",
+                callback_data="draft:tag_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 "⏰ یادآوری",
                 callback_data="draft:reminder_menu"
             )
@@ -1729,8 +1750,6 @@ def task_panel_keyboard():
             )
         ]
     ])
-
-
 async def open_task_panel(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
