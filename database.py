@@ -533,3 +533,12 @@ def update_ai_suggestion_status(suggestion_id: int, status: str, decided_by: Opt
     """, (status, decided_by, now_str(), suggestion_id))
     conn.commit()
     conn.close()
+
+
+def get_admin_ids():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE role='admin'")
+    rows = cur.fetchall()
+    conn.close()
+    return [int(row[0]) for row in rows]
