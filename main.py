@@ -285,6 +285,22 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False, input_field_placeholder="یک گزینه انتخاب کن…")
 
 
+def main_inline_keyboard() -> InlineKeyboardMarkup:
+    """Inline main menu for groups. Inline callbacks work even when Telegram privacy blocks normal group text."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ کار جدید", callback_data="main:new_task"), InlineKeyboardButton("📋 کارها", callback_data="main:tasks")],
+        [InlineKeyboardButton("🧠 مدیر هوشمند", callback_data="main:smart"), InlineKeyboardButton("🧠 تحلیل چت", callback_data="main:summary")],
+        [InlineKeyboardButton("🗓 ملاقات‌ها", callback_data="main:meetings"), InlineKeyboardButton("🎙 فرمان صوتی", callback_data="main:voice_help")],
+        [InlineKeyboardButton("🤖 چت جی‌پی‌تی", callback_data="main:gpt_chat"), InlineKeyboardButton("🤖 ایجنت عملیاتی", callback_data="main:agent_chat")],
+        [InlineKeyboardButton("📊 گزارش‌ها", callback_data="main:reports"), InlineKeyboardButton("❓ راهنما", callback_data="main:help")],
+    ])
+
+
+def chat_is_group(update: Update) -> bool:
+    c = update.effective_chat
+    return bool(c and c.type in {"group", "supergroup"})
+
+
 def back_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True, one_time_keyboard=False)
 
@@ -516,13 +532,37 @@ async def maybe_delete_user_menu(update: Update) -> None:
 
 
 # ----------------------- core send/edit helpers -----------------------
+def is_status_text(text: str) -> bool:
+    t = clean_text(re.sub(r"<[^>]+>", " ", str(text or "")))
+    if len(t) > 220:
+        return False
+    keywords = [
+        "✅", "⏳", "در حال", "ثبت شد", "ذخیره شد", "انجام شد", "لغو شد", "حذف شد", "برگشت", "رد شد",
+        "فرمان واضح نبود", "فرمت زمان", "کار پیدا نشد", "ملاقات پیدا نشد", "OPENAI_API_KEY", "فایل ثبت شد",
+    ]
+    return any(k in str(text) or k in t for k in keywords)
+
+
+async def auto_delete_later(msg: Any, seconds: Optional[int] = None) -> None:
+    if not msg or not AUTO_DELETE_BOT_STATUS:
+        return
+    try:
+        await asyncio.sleep(seconds or STATUS_DELETE_SECONDS)
+        await msg.delete()
+    except Exception:
+        pass
+
+
 async def safe_reply(update: Update, text: str, reply_markup: Any = None, parse_mode: Optional[str] = ParseMode.HTML):
-    msg = update.effective_message
-    if msg:
-        return await msg.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-    if update.effective_chat:
-        return await update.effective_chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
-    return None
+    src = update.effective_message
+    msg = None
+    if src:
+        msg = await src.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+    elif update.effective_chat:
+        msg = await update.effective_chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+    if msg and is_status_text(text):
+        asyncio.create_task(auto_delete_later(msg))
+    return msg
 
 
 async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -597,7 +637,11 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, text: st
     context.user_data.pop("draft_meeting", None)
     context.user_data.pop("pending_actions", None)
     context.user_data.pop("pending_comment", None)
-    await safe_reply(update, f"🏠 {html(text)}", reply_markup=main_keyboard())
+    if chat_is_group(update):
+        await safe_reply(update, f"🏠 <b>{html(text)}</b>\nدر گروه از دکمه‌های همین پیام استفاده کن.", reply_markup=main_inline_keyboard())
+    else:
+        await safe_reply(update, f"🏠 {html(text)}", reply_markup=main_keyboard())
+        await safe_reply(update, "🏠 <b>منوی تصویری</b>", reply_markup=main_inline_keyboard())
 
 
 # ----------------------- commands -----------------------
@@ -905,6 +949,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pass
     uid, name, _ = actor(update)
 
+    if data.startswith("main:"):
+        await handle_menu_intent(update, context, data.split(":", 1)[1])
+        return
+
     if data == "home":
         await show_home(update, context, "برگشت")
         return
@@ -992,7 +1040,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("task:notes:"):
         tid = int(data.rsplit(":", 1)[1]); await show_task_notes(update, context, tid); return
     if data.startswith("task:files:"):
-        tid = int(data.rsplit(":", 1)[1]); await show_task_files(update, context, tid); return
+        tid = int(data.rsplit(":", 1)[1])
+        context.user_data["state"] = "await_task_file"
+        context.user_data["active_task_id"] = tid
+        await show_task_files(update, context, tid)
+        return
     if data.startswith("task:addcheck:"):
         tid = int(data.rsplit(":", 1)[1])
         context.user_data["state"] = "await_check_item"; context.user_data["active_task_id"] = tid
@@ -1036,7 +1088,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("meeting:minutes:"):
         mid = int(data.rsplit(":", 1)[1]); await show_meeting_minutes(update, context, mid); return
     if data.startswith("meeting:files:"):
-        mid = int(data.rsplit(":", 1)[1]); await show_meeting_files(update, context, mid); return
+        mid = int(data.rsplit(":", 1)[1])
+        context.user_data["state"] = "await_meeting_file"
+        context.user_data["active_meeting_id"] = mid
+        await show_meeting_files(update, context, mid)
+        return
     if data.startswith("meeting:reminder:"):
         mid = int(data.rsplit(":", 1)[1])
         await edit_or_send(update, context, "⏰ یادآوری ملاقات را انتخاب کن:", reminder_keyboard(f"meetingrem:{mid}")); return
@@ -1203,7 +1259,7 @@ async def show_task_notes(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
 async def show_task_files(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: int) -> None:
     files = db.list_task_files(task_id)
     if not files:
-        text = "فایلی ثبت نشده. برای ثبت فایل، روی پیام کار Reply کن و عکس یا فایل بفرست."
+        text = "فایلی ثبت نشده. همین الان فایل/عکس را بفرست تا به این کار وصل شود. همچنین می‌توانی روی کارت کار Reply کنی."
     else:
         lines = [f"📎 <b>فایل‌های کار #{task_id}</b>"]
         for f in files[:20]:
@@ -1256,7 +1312,7 @@ async def show_meeting_minutes(update: Update, context: ContextTypes.DEFAULT_TYP
 async def show_meeting_files(update: Update, context: ContextTypes.DEFAULT_TYPE, meeting_id: int) -> None:
     files = db.list_meeting_files(meeting_id)
     if not files:
-        text = "فایلی برای ملاقات ثبت نشده."
+        text = "فایلی برای ملاقات ثبت نشده. همین الان فایل/عکس را بفرست تا به این ملاقات وصل شود."
     else:
         lines = [f"📎 <b>فایل‌های ملاقات #{meeting_id}</b>"]
         for f in files[:20]:
@@ -1340,7 +1396,7 @@ async def handle_menu_intent(update: Update, context: ContextTypes.DEFAULT_TYPE,
     elif intent == "tasks": await show_tasks(update, context)
     elif intent == "smart": await run_smart_manager(update, context)
     elif intent == "summary": await summary_cmd(update, context)
-    elif intent == "voice_help": await safe_reply(update, "🎙 ویس بفرست. مثال: «کار شماره یک انجام شد» یا «برای کار سه بنویس...»", reply_markup=main_keyboard())
+    elif intent == "voice_help": await safe_reply(update, "🎙 ویس بفرست. مثال: «کار شماره یک انجام شد» یا «برای کار سه بنویس...»", reply_markup=main_inline_keyboard() if chat_is_group(update) else main_keyboard())
     elif intent == "gpt_chat": await gpt_cmd(update, context)
     elif intent == "agent_chat": await agent_mode_cmd(update, context)
     elif intent == "reports": await reports_cmd(update, context)
@@ -1536,24 +1592,43 @@ async def handle_natural_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ----------------------- attachments -----------------------
 async def on_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await register_user(update)
     msg = update.effective_message
     if not msg:
         return
+    await register_user(update)
     uid, name, _ = actor(update)
     cid = chat_id_of(update)
     caption = clean_text(msg.caption or "")
+
     target_type, target_id = None, None
-    if msg.reply_to_message and cid:
+
+    # 1) If user tapped "files" button, attach the next uploaded file directly.
+    state = context.user_data.get("state")
+    if state == "await_task_file" and context.user_data.get("active_task_id"):
+        target_type, target_id = "task", int(context.user_data.get("active_task_id"))
+        context.user_data.pop("state", None)
+    elif state == "await_meeting_file" and context.user_data.get("active_meeting_id"):
+        target_type, target_id = "meeting", int(context.user_data.get("active_meeting_id"))
+        context.user_data.pop("state", None)
+
+    # 2) Reply to a saved task/meeting card.
+    if target_id is None and msg.reply_to_message and cid:
         ent = db.find_ui_entity(cid, msg.reply_to_message.message_id)
         if ent:
             target_type, target_id = ent["entity_type"], int(ent["entity_id"])
+
+    # 3) Caption with کار 3 / #3 / ملاقات 2.
     if target_id is None:
-        tid = parse_task_id(caption); mid = parse_meeting_id(caption)
-        if tid: target_type, target_id = "task", tid
-        elif mid: target_type, target_id = "meeting", mid
+        tid = parse_task_id(caption)
+        mid = parse_meeting_id(caption)
+        if tid:
+            target_type, target_id = "task", tid
+        elif mid:
+            target_type, target_id = "meeting", mid
+
     if target_id is None:
-        return  # keep silent to reduce group noise
+        await temp_reply(update, context, "برای اتصال فایل، اول از منوی کار/ملاقات دکمه 📎 فایل‌ها را بزن یا روی کارت کار Reply کن.")
+        return
 
     file_id, unique, ftype = None, None, "document"
     if msg.photo:
@@ -1568,12 +1643,17 @@ async def on_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         file_id, unique, ftype = msg.voice.file_id, msg.voice.file_unique_id, "voice"
     if not file_id:
         return
+
     if target_type == "task" and db.get_task(int(target_id)):
         db.add_task_file(int(target_id), file_id, unique, ftype, caption, uid, name)
+        await delete_user_message_if_possible(update)
         await temp_reply(update, context, "✅ فایل ثبت شد")
     elif target_type == "meeting" and db.get_meeting(int(target_id)):
         db.add_meeting_file(int(target_id), file_id, unique, ftype, caption, uid, name)
+        await delete_user_message_if_possible(update)
         await temp_reply(update, context, "✅ فایل ثبت شد")
+    else:
+        await temp_reply(update, context, "❌ کار یا ملاقات پیدا نشد.")
 
 
 # ----------------------- voice -----------------------
@@ -1766,7 +1846,17 @@ async def run_smart_manager(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 AGENT_SYSTEM = """
 تو مدیر عملیاتی فارسی برای ربات تلگرام SAM PRO Team Manager هستی.
-فقط JSON معتبر بده، بدون markdown.
+فقط JSON معتبر بده، بدون markdown و بدون توضیح بیرون JSON.
+
+قانون‌های مهم:
+1) دستور کاربر را تبدیل به actionهای دقیق کن.
+2) اگر کاربر گفت «بساز/بگذار/یادآوری کن/اضافه کن/انجام شد/شرح بده»، باید action مناسب بدهی.
+3) اگر نام پروژه از متن مشخص بود از یکی از این‌ها استفاده کن: تخته، میوه، پتروشیمی، مالی، غلات، غیره.
+4) وضعیت‌های مجاز کار: باز، در حال پیگیری، منتظر پاسخ، انجام شد، لغو شد.
+5) زمان‌های نسبی مثل «فردا ساعت ۱۰»، «یک ساعت دیگر»، «دوشنبه» را در reminder_text یا start_text همان‌طور متنی بده؛ ربات خودش تبدیل می‌کند.
+6) اگر task_id را دقیق نمی‌دانی ولی عنوان کار خیلی شبیه یکی از open_tasks است، task_id همان کار را استفاده کن. اگر مطمئن نیستی، action نده و manager_comment سوال بپرس.
+7) برای متن‌های عمومی و حرف‌های معمولی action نساز.
+
 اکشن‌های مجاز:
 create_task(title, project, priority, assigned_to_name, reminder_text)
 update_task_status(task_id, status)
@@ -1775,9 +1865,9 @@ set_task_reminder(task_id, reminder_text)
 create_meeting(title, project, start_text, location, participants)
 add_meeting_minutes(meeting_id, minutes)
 manager_comment(text)
-اگر مطمئن نیستی اکشن نده و در manager_comment سوال یا ابهام را بگو.
-JSON schema:
-{"actions":[{"type":"...","title":"...","task_id":1,"status":"...","note":"...","project":"...","priority":"...","reminder_text":"...","meeting_id":1,"minutes":"...","start_text":"...","location":"...","participants":["..."]}],"manager_comment":"..."}
+
+JSON schema دقیق:
+{"actions":[{"type":"create_task","title":"...","project":"...","priority":"متوسط","assigned_to_name":"...","reminder_text":"..."}],"manager_comment":""}
 """
 
 
@@ -1832,7 +1922,14 @@ async def execute_actions(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
                 title = clean_text(a.get("title") or "")
                 if not title: continue
                 rem = parse_datetime_text(a.get("reminder_text") or "") if a.get("reminder_text") else None
-                tid = db.create_task(title, project=a.get("project") or guess_project(title), priority=a.get("priority") or "متوسط", assigned_by=uid, assigned_by_name=name, chat_id=cid, reminder_at=rem, actor_type=actor_type)
+                assignee_name = clean_text(a.get("assigned_to_name") or "")
+                assignee_id = None
+                if assignee_name:
+                    for mem in db.get_members(100):
+                        mn = clean_text(mem.get("full_name") or mem.get("username") or "")
+                        if assignee_name in mn or mn in assignee_name:
+                            assignee_id = mem.get("user_id"); assignee_name = mem.get("full_name") or mem.get("username") or assignee_name; break
+                tid = db.create_task(title, project=a.get("project") or guess_project(title), priority=a.get("priority") or "متوسط", assigned_by=uid, assigned_by_name=name, assigned_to=assignee_id, assigned_to_name=assignee_name or None, chat_id=cid, reminder_at=rem, actor_type=actor_type)
                 done.append(f"✅ کار #{tid} ساخته شد")
             elif typ == "update_task_status":
                 tid = int(a.get("task_id")); status = a.get("status") or "باز"
