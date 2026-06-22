@@ -2465,6 +2465,7 @@ def init_task_metadata_columns():
 
 init_db()
 init_silent_ai_tables()
+init_task_metadata_columns()
 
 app = (
     Application
