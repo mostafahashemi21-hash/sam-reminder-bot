@@ -3220,7 +3220,7 @@ async def handle_voice_command(
 
         return True
 
-        if (
+            if (
         "لیست کار" in text
         or "کارها" in text
         or "کارا" in text
@@ -3239,7 +3239,6 @@ async def handle_voice_command(
         )
 
         return True
-
     return False
 
 init_db()
