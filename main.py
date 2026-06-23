@@ -716,7 +716,11 @@ async def keyboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Only install the lower visual ReplyKeyboard, without extra inline card."""
     await register_user(update, private=(update.effective_chat.type == "private" if update.effective_chat else False))
     if chat_is_channel(update):
-        await safe_reply(update, "در کانال منوی پایین تلگرام مثل گروه/چت خصوصی نمایش داده نمی‌شود. از /post_menu استفاده کن.", reply_markup=main_inline_keyboard())
+        # Telegram clients usually don't execute ReplyKeyboard buttons in channels.
+        # Still send a keyboard anchor for clients that show it, and ALWAYS send an
+        # inline menu that is guaranteed to send callback_query updates.
+        await send_bottom_keyboard_anchor(update, context, "⌨️ تلاش برای فعال‌سازی منوی پایین SAM")
+        await safe_reply(update, "🤖 منوی قابل‌کلیک کانال آماده است. اگر دکمه‌های پایین جواب ندادند، از همین دکمه‌های تصویری استفاده کن.", reply_markup=main_inline_keyboard())
         return
     await send_bottom_keyboard_anchor(update, context, "⌨️ منوی پایین SAM فعال شد")
 
@@ -1430,6 +1434,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # menu buttons must be handled before state to avoid creating tasks titled "کارها"
     intent = is_main_menu_intent(text)
+    logger.info("TEXT_UPDATE chat_type=%s chat_id=%s text=%r intent=%s", getattr(update.effective_chat, "type", None), cid, text, intent)
     if intent:
         await maybe_delete_user_menu(update)
         await handle_menu_intent(update, context, intent)
@@ -2158,6 +2163,17 @@ async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_chat.send_document(document=bio, filename="sam_pro_report.txt", caption="📄 reportlab نصب نبود؛ خروجی TXT ارسال شد")
 
 
+
+async def on_channel_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explicit channel-post text router.
+
+    Some Telegram deployments keep channel posts separate from normal messages.
+    This wrapper makes bottom-keyboard texts and normal text posts in channels go
+    through exactly the same router as group/private messages.
+    """
+    await on_text(update, context)
+
+
 # ----------------------- reminder jobs -----------------------
 async def reminders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -2241,6 +2257,12 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO, on_attachment))
+    # Explicit channel-post text handling: fixes cases where channel bottom-keyboard
+    # labels arrive as channel posts instead of normal group messages.
+    try:
+        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT & ~filters.COMMAND, on_channel_text), group=0)
+    except Exception:
+        pass
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(error_handler)
 
@@ -2253,4 +2275,4 @@ def build_app() -> Application:
 if __name__ == "__main__":
     application = build_app()
     print("SAM PRO Team Manager Started...")
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
